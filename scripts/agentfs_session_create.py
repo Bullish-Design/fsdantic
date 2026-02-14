@@ -1,0 +1,6 @@
+#!/usr/bin/env -S uv run --script
+from agentfs_session_lib import _run_entry, main_create
+
+
+if __name__ == "__main__":
+    _run_entry(main_create)

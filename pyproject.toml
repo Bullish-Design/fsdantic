@@ -1,7 +1,7 @@
 [project]
-name = "template-py"
+name = "fsdantic"
 version = "0.1.0"
-description = "A Python project template with modern tooling."
+description = "Type-safe Pydantic models and query interface for AgentFS SDK"
 readme = "README.md"
 requires-python = ">=3.13"
 license = { text = "MIT" }
@@ -11,15 +11,17 @@ authors = [
 ]
 
 dependencies = [
-  "pydantic>=2.12.5",
+    "agentfs-sdk>=0.6.0",
+    "pydantic>=2.0.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-  "pytest>=7.0",
-  "pytest-cov>=4.1",
-  "mypy>=1.10",
-  "ruff>=0.5.0",
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.0.0",
+    "hypothesis>=6.0.0",
+    "ruff>=0.1.0",
 ]
 
 #[project.urls]
@@ -48,20 +50,20 @@ include = [
 # Keep the default behavior; this section is here so you can extend it later if needed.
 
 [tool.pytest.ini_options]
-addopts = "-q --cov=embeddify --cov-report=term-missing"
+asyncio_mode = "auto"
 testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+markers = [
+    "benchmark: mark test as a performance benchmark",
+    "slow: mark test as slow (deselect with '-m \"not slow\"')",
+]
+addopts = [
+    "--strict-markers",
+    "--verbose",
+]
 
-[tool.mypy]
-python_version = "3.13"
-packages = ["src/template_py"]
-strict = true
-warn_unused_ignores = true
-warn_redundant_casts = true
-warn_unused_configs = true
-disallow_untyped_defs = true
-disallow_incomplete_defs = true
-disallow_untyped_calls = true
-no_implicit_optional = true
 
 [tool.ruff]
 line-length = 120
