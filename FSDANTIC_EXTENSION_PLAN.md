@@ -1,15 +1,15 @@
-# AgentFS-Pydantic Extension Implementation Plan
+# Fsdantic Extension Implementation Plan
 
 **Version:** 1.0
 **Date:** 2026-02-14
-**Status:** Design Phase
-**Goal:** Extend agentfs_pydantic to simplify cairn and provide reusable patterns for all AgentFS users
+**Status:** Implementation Phase
+**Goal:** Extend fsdantic to simplify cairn and provide reusable patterns for all AgentFS users
 
 ---
 
 ## Executive Summary
 
-This plan details the implementation of 7 major extensions to agentfs_pydantic that will:
+This plan details the implementation of 7 major extensions to fsdantic that will:
 - Reduce cairn codebase by ~250-300 lines
 - Extract reusable patterns for all AgentFS users
 - Improve maintainability and testability
@@ -47,7 +47,7 @@ Create a generic, typed repository pattern for AgentFS KV operations using Pytho
 ### API Design
 
 ```python
-# agentfs-pydantic/src/agentfs_pydantic/repository.py
+# fsdantic/src/fsdantic/repository.py
 
 from typing import TypeVar, Generic, Type, Optional, Callable
 from pydantic import BaseModel
@@ -198,13 +198,13 @@ class NamespacedKVStore:
 ### Implementation Steps
 
 1. **Week 1, Day 1-2: Core Implementation**
-   - Create `agentfs-pydantic/src/agentfs_pydantic/repository.py`
+   - Create `fsdantic/src/fsdantic/repository.py`
    - Implement `TypedKVRepository` class
    - Implement `NamespacedKVStore` helper
    - Add comprehensive docstrings
 
 2. **Week 1, Day 3: Testing**
-   - Create `agentfs-pydantic/tests/test_repository.py`
+   - Create `fsdantic/tests/test_repository.py`
    - Test save/load/delete operations
    - Test list operations with filtering
    - Test error handling (invalid JSON, missing keys)
@@ -245,7 +245,7 @@ class KVRepository:
 **After:**
 ```python
 # cairn/kv_store.py (20 lines)
-from agentfs_pydantic.repository import TypedKVRepository
+from fsdantic.repository import TypedKVRepository
 from cairn.kv_models import LifecycleRecord, SubmissionRecord, agent_key, AGENT_KEY_PREFIX
 
 class KVRepository:
@@ -290,7 +290,7 @@ Provide a general-purpose workspace materialization system for AgentFS overlays.
 ### API Design
 
 ```python
-# agentfs-pydantic/src/agentfs_pydantic/materialization.py
+# fsdantic/src/fsdantic/materialization.py
 
 from pathlib import Path
 from typing import Optional, Callable, Any
@@ -557,7 +557,7 @@ class WorkspaceMaterializer:
 **After:**
 ```python
 # cairn/workspace.py (15 lines)
-from agentfs_pydantic.materialization import Materializer
+from fsdantic.materialization import Materializer
 
 class WorkspaceMaterializer:
     def __init__(self, cairn_home: Path, stable_fs: AgentFS):
@@ -595,7 +595,7 @@ Extend the existing `View` class to support content searching within files.
 ### API Design
 
 ```python
-# agentfs-pydantic/src/agentfs_pydantic/view.py (EXTEND EXISTING)
+# fsdantic/src/fsdantic/view.py (EXTEND EXISTING)
 
 from dataclasses import dataclass
 import re
@@ -816,7 +816,7 @@ async def search_content(self, pattern: str, path: str = ".") -> list[dict]:
 **After:**
 ```python
 # cairn/external_functions.py (5 lines for search_content)
-from agentfs_pydantic import View, ViewQuery
+from fsdantic import View, ViewQuery
 
 async def search_content(self, pattern: str, path: str = ".") -> list[dict]:
     view = View(
@@ -843,7 +843,7 @@ Provide high-level operations for working with AgentFS overlay filesystems.
 ### API Design
 
 ```python
-# agentfs-pydantic/src/agentfs_pydantic/overlay.py
+# fsdantic/src/fsdantic/overlay.py
 
 from typing import Optional, Protocol, Any
 from dataclasses import dataclass
@@ -1172,7 +1172,7 @@ async def _merge_overlay_to_stable(self, source: AgentFS, target: AgentFS, src_p
 **After:**
 ```python
 # cairn/orchestrator.py (3 lines)
-from agentfs_pydantic.overlay import OverlayOperations, MergeStrategy
+from fsdantic.overlay import OverlayOperations, MergeStrategy
 
 async def accept_agent(self, agent_id: str) -> None:
     ctx = self._get_agent(agent_id)
@@ -1202,7 +1202,7 @@ Provide a high-level facade for common file operations with overlay fallthrough.
 ### API Design
 
 ```python
-# agentfs-pydantic/src/agentfs_pydantic/operations.py
+# fsdantic/src/fsdantic/operations.py
 
 from typing import Optional, Any
 from pathlib import Path
@@ -1466,7 +1466,7 @@ async def file_exists(self, path: str) -> bool:
 **After:**
 ```python
 # cairn/external_functions.py (30 lines)
-from agentfs_pydantic.operations import FileOperations
+from fsdantic.operations import FileOperations
 
 class CairnExternalFunctions:
     def __init__(self, agent_id, agent_fs, stable_fs, llm):
@@ -1510,7 +1510,7 @@ Provide base Pydantic models for common KV record patterns.
 ### API Design
 
 ```python
-# agentfs-pydantic/src/agentfs_pydantic/models.py (EXTEND)
+# fsdantic/src/fsdantic/models.py (EXTEND)
 
 import time
 from pydantic import BaseModel, Field
@@ -1601,7 +1601,7 @@ class LifecycleRecord(BaseModel):
 **After:**
 ```python
 # cairn/kv_models.py
-from agentfs_pydantic.models import KVRecord
+from fsdantic.models import KVRecord
 
 class LifecycleRecord(KVRecord):
     agent_id: str
@@ -1625,7 +1625,7 @@ Add convenience methods and fluent interfaces to View for common operations.
 ### API Design
 
 ```python
-# agentfs-pydantic/src/agentfs_pydantic/view.py (EXTEND)
+# fsdantic/src/fsdantic/view.py (EXTEND)
 
 from datetime import datetime, timedelta
 
@@ -1757,7 +1757,7 @@ class View(BaseModel):
 
 **Deliverables:**
 1. ✅ Generic Repository Pattern (Opportunity 1)
-   - Create `agentfs_pydantic/repository.py`
+   - Create `fsdantic/repository.py`
    - Migrate cairn/kv_store.py
    - Full test coverage
 
@@ -1773,11 +1773,11 @@ class View(BaseModel):
 
 **Deliverables:**
 1. ✅ Workspace Materialization (Opportunity 2)
-   - Create `agentfs_pydantic/materialization.py`
+   - Create `fsdantic/materialization.py`
    - Migrate cairn/workspace.py
 
 2. ✅ Enhanced View with Content Search (Opportunity 3)
-   - Extend `agentfs_pydantic/view.py`
+   - Extend `fsdantic/view.py`
    - Add SearchMatch model
    - Migrate cairn search functions
 
@@ -1793,11 +1793,11 @@ class View(BaseModel):
 
 **Deliverables:**
 1. ✅ Overlay Operations (Opportunity 4)
-   - Create `agentfs_pydantic/overlay.py`
+   - Create `fsdantic/overlay.py`
    - Migrate cairn merge logic
 
 2. ✅ File Operations Helper (Opportunity 5)
-   - Create `agentfs_pydantic/operations.py`
+   - Create `fsdantic/operations.py`
    - Migrate cairn external functions
 
 **Success Criteria:**
@@ -1812,11 +1812,11 @@ class View(BaseModel):
 
 **Deliverables:**
 1. ✅ KV Models Base Classes (Opportunity 6)
-   - Extend `agentfs_pydantic/models.py`
+   - Extend `fsdantic/models.py`
    - Migrate cairn models
 
 2. ✅ Query Builder Enhancements (Opportunity 7)
-   - Extend `agentfs_pydantic/view.py`
+   - Extend `fsdantic/view.py`
    - Add convenience methods
 
 3. ✅ Documentation & Examples
@@ -1836,12 +1836,12 @@ class View(BaseModel):
 ### Unit Tests
 
 ```python
-# agentfs-pydantic/tests/test_repository.py
+# fsdantic/tests/test_repository.py
 
 import pytest
 from agentfs_sdk import AgentFS
-from agentfs_pydantic import AgentFSOptions
-from agentfs_pydantic.repository import TypedKVRepository
+from fsdantic import AgentFSOptions
+from fsdantic.repository import TypedKVRepository
 from pydantic import BaseModel
 
 class TestRecord(BaseModel):
@@ -1901,7 +1901,7 @@ async def test_lifecycle_with_repository():
 ### Performance Tests
 
 ```python
-# agentfs-pydantic/tests/test_performance.py
+# fsdantic/tests/test_performance.py
 
 @pytest.mark.asyncio
 async def test_materialization_performance():
@@ -1928,7 +1928,7 @@ async def test_materialization_performance():
 # pyproject.toml
 [project]
 dependencies = [
-    "agentfs-pydantic>=0.2.0",  # Updated version with extensions
+    "fsdantic>=0.2.0",  # Updated version with extensions
     # ...
 ]
 ```
@@ -1943,10 +1943,10 @@ from cairn.workspace import WorkspaceMaterializer
 
 **After:**
 ```python
-from agentfs_pydantic.repository import TypedKVRepository
-from agentfs_pydantic.materialization import Materializer
-from agentfs_pydantic.overlay import OverlayOperations
-from agentfs_pydantic.operations import FileOperations
+from fsdantic.repository import TypedKVRepository
+from fsdantic.materialization import Materializer
+from fsdantic.overlay import OverlayOperations
+from fsdantic.operations import FileOperations
 ```
 
 #### Step 3: Simplify Code
@@ -1972,14 +1972,14 @@ If you're building your own AgentFS application:
 # Example: Custom agent system using new patterns
 
 from agentfs_sdk import AgentFS
-from agentfs_pydantic import (
+from fsdantic import (
     AgentFSOptions,
     View,
     ViewQuery
 )
-from agentfs_pydantic.repository import TypedKVRepository
-from agentfs_pydantic.operations import FileOperations
-from agentfs_pydantic.overlay import OverlayOperations
+from fsdantic.repository import TypedKVRepository
+from fsdantic.operations import FileOperations
+from fsdantic.overlay import OverlayOperations
 from pydantic import BaseModel
 
 class MyAgentState(BaseModel):
@@ -2041,7 +2041,7 @@ If any existing APIs need changes:
 ### API Documentation
 
 ```markdown
-# agentfs-pydantic/docs/api/repository.md
+# fsdantic/docs/api/repository.md
 
 # TypedKVRepository
 
@@ -2050,7 +2050,7 @@ Generic repository for typed KV operations.
 ## Usage
 
 ```python
-from agentfs_pydantic.repository import TypedKVRepository
+from fsdantic.repository import TypedKVRepository
 
 repo = TypedKVRepository[MyModel](
     storage=agent_fs,
@@ -2072,7 +2072,7 @@ record = await repo.load("key1", MyModel)
 
 ### Examples Repository
 
-Create `agentfs-pydantic/examples/` with:
+Create `fsdantic/examples/` with:
 - `01_basic_repository.py`
 - `02_materialization.py`
 - `03_overlay_operations.py`
@@ -2082,7 +2082,7 @@ Create `agentfs-pydantic/examples/` with:
 
 ### Migration Cookbook
 
-Create `agentfs-pydantic/docs/migration.md` with before/after examples for common patterns.
+Create `fsdantic/docs/migration.md` with before/after examples for common patterns.
 
 ---
 
@@ -2183,8 +2183,8 @@ If issues arise:
 ## Appendix: File Structure After Implementation
 
 ```
-agentfs-pydantic/
-├── src/agentfs_pydantic/
+fsdantic/
+├── src/fsdantic/
 │   ├── __init__.py
 │   ├── models.py              # Extended with KVRecord base classes
 │   ├── view.py                # Extended with content search & query helpers

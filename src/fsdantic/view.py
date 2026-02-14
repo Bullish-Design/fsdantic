@@ -1,12 +1,39 @@
 """View interface for querying AgentFS filesystem."""
 
 import re
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Callable, Optional
 
 from agentfs_sdk import AgentFS
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
 from .models import FileEntry, FileStats
+
+
+@dataclass
+class SearchMatch:
+    """A single content search match.
+
+    Represents a match found when searching file contents with regex
+    or string patterns.
+
+    Examples:
+        >>> match = SearchMatch(
+        ...     file="/src/main.py",
+        ...     line=42,
+        ...     text="def process(data):",
+        ...     column=0
+        ... )
+    """
+
+    file: str
+    line: int
+    text: str
+    column: Optional[int] = None
+    match_start: Optional[int] = None
+    match_end: Optional[int] = None
 
 
 class ViewQuery(BaseModel):
@@ -49,6 +76,26 @@ class ViewQuery(BaseModel):
         None,
         ge=0,
         description="Minimum file size in bytes (files smaller than this are excluded)"
+    )
+    content_pattern: Optional[str] = Field(
+        None,
+        description="Simple string pattern to search for in file contents"
+    )
+    content_regex: Optional[str] = Field(
+        None,
+        description="Regex pattern to search for in file contents"
+    )
+    case_sensitive: bool = Field(
+        default=True,
+        description="Whether content search is case-sensitive"
+    )
+    whole_word: bool = Field(
+        default=False,
+        description="Match whole words only for content search"
+    )
+    max_matches_per_file: Optional[int] = Field(
+        None,
+        description="Limit matches per file (None = unlimited)"
     )
 
     _normalized_path_pattern: str = PrivateAttr(default="*")
@@ -339,3 +386,233 @@ class View(BaseModel):
         """
         new_query = self.query.model_copy(update={"include_content": include})
         return View(agent=self.agent, query=new_query)
+
+    async def search_content(self) -> list[SearchMatch]:
+        """Search file contents matching query patterns.
+
+        Returns:
+            List of SearchMatch objects
+
+        Examples:
+            >>> view = View(
+            ...     agent=agent,
+            ...     query=ViewQuery(
+            ...         path_pattern="**/*.py",
+            ...         content_regex=r"def\s+\w+\(.*\):"
+            ...     )
+            ... )
+            >>> matches = await view.search_content()
+            >>> for match in matches:
+            ...     print(f"{match.file}:{match.line}: {match.text}")
+        """
+        if not self.query.content_pattern and not self.query.content_regex:
+            raise ValueError("Either content_pattern or content_regex must be set")
+
+        # Load files with content
+        original_include = self.query.include_content
+        self.query.include_content = True
+
+        try:
+            files = await self.load()
+        finally:
+            self.query.include_content = original_include
+
+        matches = []
+
+        # Compile regex pattern
+        if self.query.content_regex:
+            pattern = self.query.content_regex
+        else:
+            pattern = re.escape(self.query.content_pattern)
+            if self.query.whole_word:
+                pattern = r"\b" + pattern + r"\b"
+
+        flags = 0 if self.query.case_sensitive else re.IGNORECASE
+        regex = re.compile(pattern, flags)
+
+        # Search each file
+        for file in files:
+            if not file.content:
+                continue
+
+            # Handle bytes or string content
+            content = file.content
+            if isinstance(content, bytes):
+                try:
+                    content = content.decode("utf-8")
+                except UnicodeDecodeError:
+                    continue  # Skip binary files
+
+            lines = content.split("\n")
+            file_matches = 0
+
+            for line_num, line in enumerate(lines, start=1):
+                for match in regex.finditer(line):
+                    matches.append(
+                        SearchMatch(
+                            file=file.path,
+                            line=line_num,
+                            text=line.strip(),
+                            column=match.start(),
+                            match_start=match.start(),
+                            match_end=match.end(),
+                        )
+                    )
+
+                    file_matches += 1
+                    if (
+                        self.query.max_matches_per_file
+                        and file_matches >= self.query.max_matches_per_file
+                    ):
+                        break
+
+                if (
+                    self.query.max_matches_per_file
+                    and file_matches >= self.query.max_matches_per_file
+                ):
+                    break
+
+        return matches
+
+    async def files_containing(
+        self, pattern: str, regex: bool = False
+    ) -> list[FileEntry]:
+        """Get files that contain the specified pattern.
+
+        Args:
+            pattern: Pattern to search for
+            regex: If True, treat pattern as regex
+
+        Returns:
+            List of FileEntry objects that contain the pattern
+
+        Examples:
+            >>> files = await view.files_containing("TODO")
+            >>> print(f"Found {len(files)} files with TODOs")
+        """
+        query = self.query.model_copy(
+            update={"content_regex" if regex else "content_pattern": pattern}
+        )
+        search_view = View(agent=self.agent, query=query)
+        matches = await search_view.search_content()
+
+        # Get unique files
+        file_paths = set(m.file for m in matches)
+
+        # Load file entries
+        return [f for f in await self.load() if f.path in file_paths]
+
+    def with_size_range(
+        self, min_size: Optional[int] = None, max_size: Optional[int] = None
+    ) -> "View":
+        """Create view with size constraints.
+
+        Args:
+            min_size: Minimum file size in bytes
+            max_size: Maximum file size in bytes
+
+        Returns:
+            New View instance with updated size constraints
+
+        Examples:
+            >>> # Files between 1KB and 1MB
+            >>> view = view.with_size_range(1024, 1024*1024)
+        """
+        new_query = self.query.model_copy(
+            update={"min_size": min_size, "max_size": max_size}
+        )
+        return View(agent=self.agent, query=new_query)
+
+    def with_regex(self, pattern: str) -> "View":
+        """Create view with regex path filter.
+
+        Args:
+            pattern: Regex pattern for matching file paths
+
+        Returns:
+            New View instance with updated regex pattern
+
+        Examples:
+            >>> # Python files in src/ directory
+            >>> view = view.with_regex(r"^src/.*\.py$")
+        """
+        new_query = self.query.model_copy(update={"regex_pattern": pattern})
+        return View(agent=self.agent, query=new_query)
+
+    async def recent_files(self, max_age: timedelta | float) -> list[FileEntry]:
+        """Get files modified within time window.
+
+        Args:
+            max_age: Maximum age as timedelta or seconds
+
+        Returns:
+            List of files modified within the specified time window
+
+        Examples:
+            >>> # Files modified in last hour
+            >>> recent = await view.recent_files(timedelta(hours=1))
+        """
+        if isinstance(max_age, timedelta):
+            max_age = max_age.total_seconds()
+
+        cutoff = datetime.now().timestamp() - max_age
+
+        files = await self.load()
+        return [
+            f
+            for f in files
+            if f.stats and f.stats.mtime.timestamp() >= cutoff
+        ]
+
+    async def largest_files(self, n: int = 10) -> list[FileEntry]:
+        """Get N largest files.
+
+        Args:
+            n: Number of files to return
+
+        Returns:
+            List of the N largest files
+
+        Examples:
+            >>> # Top 10 largest files
+            >>> large = await view.largest_files(10)
+        """
+        files = await self.load()
+        files_with_size = [f for f in files if f.stats]
+        files_with_size.sort(key=lambda f: f.stats.size, reverse=True)
+        return files_with_size[:n]
+
+    async def total_size(self) -> int:
+        """Calculate total size of matching files.
+
+        Returns:
+            Total size in bytes of all matching files
+
+        Examples:
+            >>> # Total size of Python files
+            >>> size = await view.with_pattern("*.py").total_size()
+            >>> print(f"Total size: {size / 1024 / 1024:.2f} MB")
+        """
+        files = await self.load()
+        return sum(f.stats.size for f in files if f.stats)
+
+    async def group_by_extension(self) -> dict[str, list[FileEntry]]:
+        """Group files by extension.
+
+        Returns:
+            Dictionary mapping extensions to lists of files
+
+        Examples:
+            >>> grouped = await view.group_by_extension()
+            >>> print(f"Python files: {len(grouped.get('.py', []))}")
+        """
+        files = await self.load()
+        groups: dict[str, list[FileEntry]] = {}
+
+        for file in files:
+            ext = Path(file.path).suffix or "(no extension)"
+            if ext not in groups:
+                groups[ext] = []
+            groups[ext].append(file)
+
+        return groups

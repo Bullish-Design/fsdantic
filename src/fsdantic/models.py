@@ -1,5 +1,6 @@
 """Pydantic models for AgentFS SDK."""
 
+import time
 from datetime import datetime
 from enum import Enum
 from typing import Any, Optional
@@ -204,3 +205,60 @@ class FileEntry(BaseModel):
         None,
         description="File content (if loaded)"
     )
+
+
+class KVRecord(BaseModel):
+    """Base model for records stored in KV store.
+
+    Provides automatic timestamp tracking for creation and updates.
+
+    Examples:
+        >>> class UserRecord(KVRecord):
+        ...     user_id: str
+        ...     name: str
+        ...     email: str
+        >>>
+        >>> user = UserRecord(user_id="alice", name="Alice", email="alice@example.com")
+        >>> user.created_at  # Automatically set
+        >>> user.mark_updated()  # Update the timestamp
+    """
+
+    created_at: float = Field(
+        default_factory=time.time,
+        description="Creation timestamp (Unix epoch)"
+    )
+    updated_at: float = Field(
+        default_factory=time.time,
+        description="Last update timestamp (Unix epoch)"
+    )
+
+    def mark_updated(self) -> None:
+        """Update the updated_at timestamp to current time."""
+        self.updated_at = time.time()
+
+
+class VersionedKVRecord(KVRecord):
+    """KV record with version tracking.
+
+    Extends KVRecord to include version numbering for tracking
+    changes to records over time.
+
+    Examples:
+        >>> class ConfigRecord(VersionedKVRecord):
+        ...     settings: dict
+        >>>
+        >>> config = ConfigRecord(settings={"theme": "dark"})
+        >>> config.version  # 1
+        >>> config.increment_version()
+        >>> config.version  # 2
+    """
+
+    version: int = Field(
+        default=1,
+        description="Record version number"
+    )
+
+    def increment_version(self) -> None:
+        """Increment version and update timestamp."""
+        self.version += 1
+        self.mark_updated()
