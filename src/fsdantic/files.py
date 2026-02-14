@@ -493,15 +493,23 @@ class FileManager:
             path = pending.pop()
             try:
                 items = await self.agent_fs.fs.readdir(path)
-            except FileNotFoundError:
-                continue
+            except ErrnoException as error:
+                if error.code == "ENOENT":
+                    continue
+                context = f"FileManager.traverse_files(root={root!r}, current_path={path!r})"
+                raise translate_agentfs_error(error, context) from error
 
             for item in items:
                 item_path = join_normalized_path(path, item)
                 try:
                     stats = await self.agent_fs.fs.stat(item_path)
-                except FileNotFoundError:
-                    continue
+                except ErrnoException as error:
+                    if error.code == "ENOENT":
+                        continue
+                    context = (
+                        f"FileManager.traverse_files(root={root!r}, current_path={item_path!r})"
+                    )
+                    raise translate_agentfs_error(error, context) from error
 
                 if stats.is_directory():
                     if recursive:
