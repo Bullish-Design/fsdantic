@@ -680,9 +680,14 @@ class TestContentSearchIntegration:
                     ),
                 )
 
+                # Binary file should be returned as raw bytes instead of crashing decode
+                files = await view.load()
+                content_by_path = {f.path: f.content for f in files}
+                assert isinstance(content_by_path["/binary.dat"], bytes)
+
                 matches = await view.search_content()
 
-                # Should only find match in text file
+                # Should only find match in text file; binary is skipped during content search
                 assert len(matches) == 1
                 assert matches[0].file == "/text.txt"
 

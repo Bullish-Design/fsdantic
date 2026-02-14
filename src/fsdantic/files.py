@@ -384,6 +384,15 @@ class FileManager:
             if query.include_content:
                 try:
                     content = await self.agent_fs.fs.read_file(item_path)
+                except UnicodeDecodeError:
+                    try:
+                        content = await self.agent_fs.fs.read_file(item_path, encoding=None)
+                    except ErrnoException as e:
+                        if e.code == "ENOENT":
+                            logger.debug("Path disappeared before binary read: %s", item_path)
+                            continue
+                        context = f"FileManager.query(path={item_path!r})"
+                        raise translate_agentfs_error(e, context) from e
                 except ErrnoException as e:
                     if e.code == "ENOENT":
                         logger.debug("Path disappeared before read: %s", item_path)
