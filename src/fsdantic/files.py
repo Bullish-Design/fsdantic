@@ -11,6 +11,7 @@ from agentfs_sdk import AgentFS, ErrnoException
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
 from ._internal.errors import translate_agentfs_error
+from .exceptions import FileNotFoundError
 from ._internal.paths import join_normalized_path, normalize_glob_pattern, normalize_path
 from .models import FileEntry, FileStats
 
@@ -148,6 +149,8 @@ class FileManager:
         """Read a file using explicit mode semantics.
 
         Reads from overlay first and falls through to ``base_fs`` on ``ENOENT``.
+        For backward compatibility, directory reads (``EISDIR``) are normalized
+        to ``FileNotFoundError`` for this method.
 
         * ``mode='text'`` returns ``str`` and requires a valid text ``encoding``.
         * ``mode='binary'`` returns ``bytes`` and requires ``encoding=None``.
@@ -176,6 +179,13 @@ class FileManager:
         try:
             return await self.agent_fs.fs.read_file(path, encoding=resolved_encoding)
         except ErrnoException as e:
+            if e.code == "EISDIR":
+                base_message = getattr(e, "message", None) or str(e)
+                raise FileNotFoundError(
+                    f"{context}: {base_message}",
+                    path=getattr(e, "path", None),
+                    cause=e,
+                ) from e
             if e.code != "ENOENT":
                 raise translate_agentfs_error(e, context) from e
             if self.base_fs is None:

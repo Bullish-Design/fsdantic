@@ -8,6 +8,7 @@ from fsdantic import (
     FileNotFoundError,
     FileStats,
     FileSystemError,
+    IsADirectoryError,
     NotADirectoryError,
     PermissionError,
     View,
@@ -597,6 +598,7 @@ class _FakeFsBoundary:
         self,
         *,
         read_error=None,
+        write_error=None,
         stat_error=None,
         readdir_error=None,
         rm_error=None,
@@ -604,6 +606,7 @@ class _FakeFsBoundary:
         rmdir_error=None,
     ):
         self.read_error = read_error
+        self.write_error = write_error
         self.stat_error = stat_error
         self.readdir_error = readdir_error
         self.rm_error = rm_error
@@ -614,6 +617,10 @@ class _FakeFsBoundary:
         if self.read_error is not None:
             raise self.read_error(path)
         return "ok"
+
+    async def write_file(self, path, content):
+        if self.write_error is not None:
+            raise self.write_error(path)
 
     async def stat(self, path):
         if self.stat_error is not None:
@@ -660,6 +667,44 @@ class TestFileManagerErrorTranslation:
             await manager.read("dir//./file.txt")
 
         assert exc_info.value.path == "/dir/file.txt"
+
+    async def test_read_eisdir_normalizes_to_file_not_found_with_context(self):
+        manager = FileManager(
+            _FakeAgent(
+                _FakeFsBoundary(
+                    read_error=lambda path: ErrnoException(
+                        "EISDIR", "read", path=path, message="is a directory"
+                    )
+                )
+            )
+        )
+
+        with pytest.raises(
+            FileNotFoundError,
+            match=r"FileManager.read\(path='/folder'\): .*is a directory",
+        ) as exc_info:
+            await manager.read("folder")
+
+        assert exc_info.value.path == "/folder"
+
+    async def test_write_eisdir_still_translates_to_is_a_directory_error(self):
+        manager = FileManager(
+            _FakeAgent(
+                _FakeFsBoundary(
+                    write_error=lambda path: ErrnoException(
+                        "EISDIR", "write", path=path, message="is a directory"
+                    )
+                )
+            )
+        )
+
+        with pytest.raises(
+            IsADirectoryError,
+            match=r"FileManager.write\(path='/folder'\): .*is a directory",
+        ) as exc_info:
+            await manager.write("folder", "content")
+
+        assert exc_info.value.path == "/folder"
 
     async def test_stat_translates_with_context_and_normalized_path(self):
         manager = FileManager(
