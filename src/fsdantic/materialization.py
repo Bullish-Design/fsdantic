@@ -6,7 +6,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable, Optional
 
-from agentfs_sdk import AgentFS
+from agentfs_sdk import AgentFS, ErrnoException
 
 from .view import ViewQuery
 
@@ -210,9 +210,10 @@ class Materializer:
                                 new_size=overlay_size,
                             )
                         )
-                except Exception:
-                    # If we can't read files, skip
-                    pass
+                except ErrnoException as e:
+                    # If files disappear during diff, skip only missing files
+                    if e.code != "ENOENT":
+                        raise
 
         return changes
 
@@ -241,7 +242,10 @@ class Materializer:
         """
         try:
             entries = await source_fs.fs.readdir(src_path)
-        except FileNotFoundError:
+        except ErrnoException as e:
+            if e.code == "ENOENT":
+                return
+            errors.append((src_path, str(e)))
             return
         except Exception as e:
             errors.append((src_path, str(e)))
@@ -328,10 +332,16 @@ class Materializer:
                             await walk(entry_path)
                         else:
                             files[entry_path] = stat.size
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+                    except ErrnoException as e:
+                        if e.code == "ENOENT":
+                            pass
+                        else:
+                            raise
+            except ErrnoException as e:
+                if e.code == "ENOENT":
+                    pass
+                else:
+                    raise
 
         await walk(path)
         return files

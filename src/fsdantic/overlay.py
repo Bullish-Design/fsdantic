@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Optional, Protocol
 
-from agentfs_sdk import AgentFS
+from agentfs_sdk import AgentFS, ErrnoException
 
 
 class MergeStrategy(str, Enum):
@@ -148,7 +148,10 @@ class OverlayOperations:
         """
         try:
             entries = await source.fs.readdir(path)
-        except FileNotFoundError:
+        except ErrnoException as e:
+            if e.code == "ENOENT":
+                return
+            errors.append((path, str(e)))
             return
         except Exception as e:
             errors.append((path, str(e)))
@@ -166,7 +169,9 @@ class OverlayOperations:
                     # Ensure directory exists in target
                     try:
                         await target.fs.stat(source_path)
-                    except FileNotFoundError:
+                    except ErrnoException as e:
+                        if e.code != "ENOENT":
+                            raise
                         # Directory doesn't exist, create it
                         # Note: AgentFS mkdir creates parent dirs automatically
                         await target.fs.mkdir(source_path.lstrip("/"))
@@ -187,7 +192,9 @@ class OverlayOperations:
                     try:
                         target_content = await target.fs.read_file(source_path)
                         target_exists = True
-                    except FileNotFoundError:
+                    except ErrnoException as e:
+                        if e.code != "ENOENT":
+                            raise
                         pass
 
                     # Handle conflict
@@ -254,10 +261,15 @@ class OverlayOperations:
                             await walk(full_path)
                         else:
                             files.append(full_path)
-                    except FileNotFoundError:
+                    except ErrnoException as e:
+                        if e.code != "ENOENT":
+                            raise
                         pass
-            except FileNotFoundError:
-                pass
+            except ErrnoException as e:
+                if e.code == "ENOENT":
+                    pass
+                else:
+                    raise
 
         await walk(path)
         return files
