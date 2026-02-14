@@ -413,7 +413,8 @@ class TestPydanticModelsIntegration:
 
                 # Create FileEntry from SDK data
                 sdk_stats = await agent.fs.stat("/workflow.txt")
-                content = await agent.fs.read_file("/workflow.txt")
+                # Default read_file() returns text, so request bytes explicitly for binary assertions.
+                content = await agent.fs.read_file("/workflow.txt", encoding=None)
 
                 entry = FileEntry(
                     path="/workflow.txt",
@@ -436,7 +437,8 @@ class TestPydanticModelsIntegration:
                 await agent.fs.write_file(entry.path, new_content)
 
                 # Verify modification
-                updated_content = await agent.fs.read_file("/workflow.txt")
+                # Default read_file() returns text, so request bytes explicitly for binary assertions.
+                updated_content = await agent.fs.read_file("/workflow.txt", encoding=None)
                 assert updated_content == new_content
 
             finally:
