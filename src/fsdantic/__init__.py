@@ -22,6 +22,7 @@ from .exceptions import (
 from .client import Fsdantic
 from .files import FileManager
 from .kv import KVManager
+from .operations import FileOperations
 from .materialization import (
     ConflictResolution,
     FileChange,
@@ -59,6 +60,7 @@ __all__ = [
     "Workspace",
     # Managers
     "FileManager",
+    "FileOperations",  # Compatibility alias (prefer FileManager)
     "KVManager",
     "OverlayManager",
     "MaterializationManager",
