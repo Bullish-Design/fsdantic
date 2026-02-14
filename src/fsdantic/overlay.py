@@ -116,10 +116,28 @@ class OverlayOperations:
         conflicts = []
         errors = []
 
-        # Recursively copy files from source to target
-        await self._merge_recursive(
-            source, target, path, effective_strategy, stats, conflicts, errors
-        )
+        try:
+            source_root_stat = await source.fs.stat(path)
+        except ErrnoException as e:
+            if e.code == "ENOENT":
+                return MergeResult(files_merged=0, conflicts=conflicts, errors=errors)
+            errors.append((path, str(e)))
+            return MergeResult(files_merged=0, conflicts=conflicts, errors=errors)
+        except Exception as e:
+            errors.append((path, str(e)))
+            return MergeResult(files_merged=0, conflicts=conflicts, errors=errors)
+
+        if source_root_stat.is_file():
+            await self._merge_file(
+                source, target, path, effective_strategy, stats, conflicts, errors
+            )
+        elif source_root_stat.is_directory():
+            # Recursively copy files from source to target
+            await self._merge_recursive(
+                source, target, path, effective_strategy, stats, conflicts, errors
+            )
+        else:
+            errors.append((path, "Path is not a file or directory"))
 
         return MergeResult(
             files_merged=stats["files_merged"], conflicts=conflicts, errors=errors
@@ -184,50 +202,73 @@ class OverlayOperations:
 
                 # Handle file
                 if source_stat.is_file():
-                    source_content = await source.fs.read_file(source_path, encoding=None)
-
-                    # Check if file exists in target
-                    target_exists = False
-                    target_content = None
-                    try:
-                        target_content = await target.fs.read_file(source_path, encoding=None)
-                        target_exists = True
-                    except ErrnoException as e:
-                        if e.code != "ENOENT":
-                            raise
-                        pass
-
-                    # Handle conflict
-                    if target_exists and source_content != target_content:
-                        conflict = MergeConflict(
-                            path=source_path,
-                            overlay_size=len(source_content),
-                            base_size=len(target_content) if target_content else 0,
-                            overlay_content=source_content,
-                            base_content=target_content or b"",
-                        )
-
-                        if strategy == MergeStrategy.ERROR:
-                            errors.append((source_path, "Conflict detected"))
-                            continue
-                        elif strategy == MergeStrategy.PRESERVE:
-                            # Keep target version
-                            conflicts.append(conflict)
-                            continue
-                        elif strategy == MergeStrategy.CALLBACK:
-                            if self.conflict_resolver:
-                                source_content = self.conflict_resolver.resolve(conflict)
-                            conflicts.append(conflict)
-                        # OVERWRITE: use source_content (default)
-
-                    # Write to target
-                    # Use relative path (strip leading /)
-                    target_path = source_path.lstrip("/")
-                    await target.fs.write_file(target_path, source_content)
-                    stats["files_merged"] += 1
+                    await self._merge_file(
+                        source,
+                        target,
+                        source_path,
+                        strategy,
+                        stats,
+                        conflicts,
+                        errors,
+                    )
 
             except Exception as e:
                 errors.append((source_path, str(e)))
+
+    async def _merge_file(
+        self,
+        source: AgentFS,
+        target: AgentFS,
+        source_path: str,
+        strategy: MergeStrategy,
+        stats: dict,
+        conflicts: list[MergeConflict],
+        errors: list[tuple[str, str]],
+    ) -> None:
+        """Merge a single file from source into target."""
+        try:
+            source_content = await source.fs.read_file(source_path, encoding=None)
+
+            # Check if file exists in target
+            target_exists = False
+            target_content = None
+            try:
+                target_content = await target.fs.read_file(source_path, encoding=None)
+                target_exists = True
+            except ErrnoException as e:
+                if e.code != "ENOENT":
+                    raise
+
+            # Handle conflict
+            if target_exists and source_content != target_content:
+                conflict = MergeConflict(
+                    path=source_path,
+                    overlay_size=len(source_content),
+                    base_size=len(target_content) if target_content else 0,
+                    overlay_content=source_content,
+                    base_content=target_content or b"",
+                )
+
+                if strategy == MergeStrategy.ERROR:
+                    errors.append((source_path, "Conflict detected"))
+                    return
+                if strategy == MergeStrategy.PRESERVE:
+                    # Keep target version
+                    conflicts.append(conflict)
+                    return
+                if strategy == MergeStrategy.CALLBACK:
+                    if self.conflict_resolver:
+                        source_content = self.conflict_resolver.resolve(conflict)
+                    conflicts.append(conflict)
+                # OVERWRITE: use source_content (default)
+
+            # Write to target
+            # Use relative path (strip leading /)
+            target_path = source_path.lstrip("/")
+            await target.fs.write_file(target_path, source_content)
+            stats["files_merged"] += 1
+        except Exception as e:
+            errors.append((source_path, str(e)))
 
     async def list_changes(self, overlay: AgentFS, path: str = "/") -> list[str]:
         """List files that exist in overlay at path.

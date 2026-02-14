@@ -50,6 +50,27 @@ class TestOverlayOperationsMerge:
         with pytest.raises(ErrnoException):
             await stable_fs.fs.read_file("/exclude/file.txt")
 
+    async def test_merge_with_specific_file_path(self, agent_fs, stable_fs):
+        """Should merge exactly one file when path points to a file."""
+        await stable_fs.fs.write_file("/single-file", "target content")
+        await agent_fs.fs.write_file("/single-file", "source content")
+        await agent_fs.fs.write_file("/other-file", "other content")
+
+        ops = OverlayOperations(strategy=MergeStrategy.PRESERVE)
+        result = await ops.merge(agent_fs, stable_fs, path="/single-file")
+
+        # Should process only the single file path and preserve target on conflict
+        assert result.files_merged == 0
+        assert len(result.conflicts) == 1
+        assert result.conflicts[0].path == "/single-file"
+        assert result.errors == []
+        assert await stable_fs.fs.read_file("/single-file") == "target content"
+
+        from agentfs_sdk import ErrnoException
+
+        with pytest.raises(ErrnoException):
+            await stable_fs.fs.read_file("/other-file")
+
     async def test_merge_files_merged_count(self, agent_fs, stable_fs):
         """Should count merged files correctly."""
         for i in range(5):
