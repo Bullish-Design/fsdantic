@@ -23,6 +23,7 @@ from .client import Fsdantic
 from .materialization import (
     ConflictResolution,
     FileChange,
+    MaterializationManager,
     MaterializationResult,
     Materializer,
 )
@@ -44,6 +45,7 @@ from .overlay import (
     MergeConflict,
     MergeResult,
     MergeStrategy,
+    OverlayManager,
     OverlayOperations,
 )
 from .repository import NamespacedKVStore, TypedKVRepository
@@ -74,10 +76,12 @@ __all__ = [
     "NamespacedKVStore",
     # Materialization
     "Materializer",
+    "MaterializationManager",
     "MaterializationResult",
     "FileChange",
     "ConflictResolution",
     # Overlay operations
+    "OverlayManager",
     "OverlayOperations",
     "MergeStrategy",
     "MergeResult",
