@@ -75,7 +75,6 @@ async def read_agentfs_file(fs: AgentFS, path: str) -> bytes:
 
 ```
 .context/
-├── AgentFS_SPEC.md                    # Full AgentFS specification
 └── agentfs-main/
     ├── SPEC.md                        # Specification document
     ├── README.md                      # Overview and quick start
