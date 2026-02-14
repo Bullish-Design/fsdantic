@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agentfs_sdk import AgentFS
 
-from .repository import TypedKVRepository
+from .exceptions import KVStoreError, KeyNotFoundError, SerializationError
+
+if TYPE_CHECKING:
+    from .repository import TypedKVRepository
+
+
+_MISSING = object()
 
 
 class KVManager:
@@ -69,13 +75,44 @@ class KVManager:
         """Return the fully-qualified KV key for this manager namespace."""
         return f"{self._prefix}{key}"
 
-    async def get(self, key: str) -> Any:
+    async def get(self, key: str, default: Any = _MISSING) -> Any:
         """Get a value by key using simple KV semantics.
 
         This is for direct, untyped KV access. For model validation and typed
         records, prefer `repository()`.
+
+        Contract:
+            - If `key` exists, return its stored value.
+            - If `key` does not exist and `default` is provided, return `default`.
+            - If `key` does not exist and no `default` is provided,
+              raise `KeyNotFoundError`.
         """
-        return await self._agent_fs.kv.get(self._qualify_key(key))
+        qualified_key = self._qualify_key(key)
+        try:
+            value = await self._agent_fs.kv.get(qualified_key)
+        except Exception as exc:
+            raise SerializationError(
+                f"KV deserialization failed during get for key='{qualified_key}' "
+                f"(prefix='{self._prefix}')"
+            ) from exc
+
+        if value is not None:
+            return value
+
+        try:
+            matched = await self._agent_fs.kv.list(prefix=qualified_key)
+        except Exception as exc:
+            raise KVStoreError(
+                f"KV operation=get-check-missing failed for key='{qualified_key}' "
+                f"(prefix='{self._prefix}')"
+            ) from exc
+
+        exists = any(item.get("key") == qualified_key for item in matched)
+        if exists:
+            return value
+        if default is not _MISSING:
+            return default
+        raise KeyNotFoundError(qualified_key)
 
     async def set(self, key: str, value: Any) -> None:
         """Set a value by key using simple KV semantics.
@@ -83,15 +120,57 @@ class KVManager:
         This stores raw KV values directly. For Pydantic models, prefer
         `repository().save(...)`.
         """
-        await self._agent_fs.kv.set(self._qualify_key(key), value)
+        qualified_key = self._qualify_key(key)
+        try:
+            await self._agent_fs.kv.set(qualified_key, value)
+        except (TypeError, ValueError) as exc:
+            raise SerializationError(
+                f"KV serialization failed during set for key='{qualified_key}' "
+                f"(prefix='{self._prefix}')"
+            ) from exc
+        except Exception as exc:
+            raise KVStoreError(
+                f"KV operation=set failed for key='{qualified_key}' "
+                f"(prefix='{self._prefix}')"
+            ) from exc
 
-    async def delete(self, key: str) -> None:
-        """Delete a value by key using simple KV semantics."""
-        await self._agent_fs.kv.delete(self._qualify_key(key))
+    async def delete(self, key: str) -> bool:
+        """Delete a value by key using simple KV semantics.
+
+        Contract:
+            - Returns `True` when a key existed and was deleted.
+            - Returns `False` when the key did not exist.
+            - Missing-key deletes are a stable no-op.
+        """
+        qualified_key = self._qualify_key(key)
+        try:
+            matched = await self._agent_fs.kv.list(prefix=qualified_key)
+        except Exception as exc:
+            raise KVStoreError(
+                f"KV operation=delete-check-exists failed for key='{qualified_key}' "
+                f"(prefix='{self._prefix}')"
+            ) from exc
+
+        exists = any(item.get("key") == qualified_key for item in matched)
+        if not exists:
+            return False
+
+        try:
+            await self._agent_fs.kv.delete(qualified_key)
+        except Exception as exc:
+            raise KVStoreError(
+                f"KV operation=delete failed for key='{qualified_key}' "
+                f"(prefix='{self._prefix}')"
+            ) from exc
+        return True
 
     async def exists(self, key: str) -> bool:
         """Return whether a key exists using simple KV semantics."""
-        return await self.get(key) is not None
+        try:
+            await self.get(key)
+        except KeyNotFoundError:
+            return False
+        return True
 
     async def list(self, prefix: str = "") -> list[dict[str, Any]]:
         """List key-value entries for a simple KV prefix.
@@ -121,6 +200,8 @@ class KVManager:
         Use this when you want typed, model-validated records instead of raw
         simple KV values.
         """
+        from .repository import TypedKVRepository
+
         return TypedKVRepository(
             self._agent_fs,
             prefix=self._compose_prefix(self._prefix, prefix),
