@@ -1,12 +1,17 @@
 """Tests for FileManager helper class."""
 
 import pytest
+from agentfs_sdk import ErrnoException
 from fsdantic import (
     DirectoryNotEmptyError,
     FileManager,
     FileNotFoundError,
     FileStats,
+    FileSystemError,
     NotADirectoryError,
+    PermissionError,
+    View,
+    ViewQuery,
 )
 
 
@@ -585,3 +590,186 @@ class TestFileManagerIntegration:
         # 6. Verify base unchanged
         base_config = await stable_fs.fs.read_file("/config/default.json")
         assert "light" in base_config
+
+
+class _FakeFsBoundary:
+    def __init__(
+        self,
+        *,
+        read_error=None,
+        stat_error=None,
+        readdir_error=None,
+        rm_error=None,
+        unlink_error=None,
+        rmdir_error=None,
+    ):
+        self.read_error = read_error
+        self.stat_error = stat_error
+        self.readdir_error = readdir_error
+        self.rm_error = rm_error
+        self.unlink_error = unlink_error
+        self.rmdir_error = rmdir_error
+
+    async def read_file(self, path, encoding="utf-8"):
+        if self.read_error is not None:
+            raise self.read_error(path)
+        return "ok"
+
+    async def stat(self, path):
+        if self.stat_error is not None:
+            raise self.stat_error(path)
+        raise ErrnoException("ENOENT", "stat", path=path, message="missing")
+
+    async def readdir(self, path):
+        if self.readdir_error is not None:
+            raise self.readdir_error(path)
+        return []
+
+    async def rm(self, path, recursive=False):
+        if self.rm_error is not None:
+            raise self.rm_error(path)
+
+    async def unlink(self, path):
+        if self.unlink_error is not None:
+            raise self.unlink_error(path)
+
+    async def rmdir(self, path):
+        if self.rmdir_error is not None:
+            raise self.rmdir_error(path)
+
+
+class _FakeAgent:
+    def __init__(self, fs):
+        self.fs = fs
+
+
+@pytest.mark.asyncio
+class TestFileManagerErrorTranslation:
+    async def test_read_translates_with_context_and_normalized_path(self):
+        manager = FileManager(
+            _FakeAgent(
+                _FakeFsBoundary(
+                    read_error=lambda path: ErrnoException(
+                        "EPERM", "read", path=path, message="blocked"
+                    )
+                )
+            )
+        )
+
+        with pytest.raises(PermissionError, match=r"FileManager.read\(path='/dir/file.txt'\): .*blocked") as exc_info:
+            await manager.read("dir//./file.txt")
+
+        assert exc_info.value.path == "/dir/file.txt"
+
+    async def test_stat_translates_with_context_and_normalized_path(self):
+        manager = FileManager(
+            _FakeAgent(
+                _FakeFsBoundary(
+                    stat_error=lambda path: ErrnoException(
+                        "ENOTDIR", "stat", path=path, message="bad dir"
+                    )
+                )
+            )
+        )
+
+        with pytest.raises(
+            NotADirectoryError,
+            match=r"FileManager.stat\(path='/dir/file.txt'\): .*bad dir",
+        ) as exc_info:
+            await manager.stat("dir//./file.txt")
+
+        assert exc_info.value.path == "/dir/file.txt"
+
+    async def test_remove_translates_with_context_and_normalized_path(self):
+        manager = FileManager(
+            _FakeAgent(
+                _FakeFsBoundary(
+                    stat_error=lambda path: ErrnoException(
+                        "EPERM", "stat", path=path, message="denied"
+                    )
+                )
+            )
+        )
+
+        with pytest.raises(
+            PermissionError,
+            match=r"FileManager.remove\(path='/to/remove.txt', recursive=False\): .*denied",
+        ) as exc_info:
+            await manager.remove("to//remove.txt")
+
+        assert exc_info.value.path == "/to/remove.txt"
+
+    async def test_query_translates_with_context_and_normalized_path(self):
+        manager = FileManager(
+            _FakeAgent(
+                _FakeFsBoundary(
+                    readdir_error=lambda path: ErrnoException(
+                        "EPERM", "readdir", path=path, message="no access"
+                    )
+                )
+            )
+        )
+
+        with pytest.raises(
+            PermissionError,
+            match=r"FileManager.traverse_files\(root='/', current_path='/'\): .*no access",
+        ):
+            await manager.query(ViewQuery(path_pattern="*.txt"))
+
+    async def test_tree_translates_with_context_and_normalized_path(self):
+        manager = FileManager(
+            _FakeAgent(
+                _FakeFsBoundary(
+                    readdir_error=lambda path: ErrnoException(
+                        "EPERM", "readdir", path=path, message="blocked tree"
+                    )
+                )
+            )
+        )
+
+        with pytest.raises(
+            PermissionError,
+            match=r"FileManager.tree\(path='/root', current_path='/root'\): .*blocked tree",
+        ):
+            await manager.tree("root//")
+
+    async def test_view_load_surfaces_same_query_translation_as_filemanager(self):
+        fake_agent = _FakeAgent(
+            _FakeFsBoundary(
+                readdir_error=lambda path: ErrnoException(
+                    "EPERM", "readdir", path=path, message="no access"
+                )
+            )
+        )
+        manager = FileManager(fake_agent)
+        view = View.model_construct(
+            agent=fake_agent, query=ViewQuery(path_pattern="*.txt")
+        )
+
+        with pytest.raises(PermissionError) as direct_exc:
+            await manager.query(view.query)
+
+        with pytest.raises(PermissionError) as view_exc:
+            await view.load()
+
+        assert str(view_exc.value) == str(direct_exc.value)
+        assert type(view_exc.value) is type(direct_exc.value)
+
+    async def test_unknown_errno_fallback_remains_file_system_error_with_context(self):
+        manager = FileManager(
+            _FakeAgent(
+                _FakeFsBoundary(
+                    stat_error=lambda path: ErrnoException(
+                        "ENOSYS", "stat", path=path, message="unknown"
+                    )
+                )
+            )
+        )
+
+        with pytest.raises(
+            FileSystemError,
+            match=r"FileManager.stat\(path='/some/path.txt'\): .*unknown",
+        ) as exc_info:
+            await manager.stat("some/path.txt")
+
+        assert type(exc_info.value) is FileSystemError
