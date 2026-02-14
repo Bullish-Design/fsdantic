@@ -1,17 +1,104 @@
 """Primary public API for file operations and traversal."""
 
+import logging
+import re
 from collections.abc import AsyncIterator
-from typing import TYPE_CHECKING, Any, Optional
+from typing import Any, Optional
 
 from agentfs_sdk import AgentFS, ErrnoException
+from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
 from ._internal.errors import translate_agentfs_error
-from ._internal.paths import join_normalized_path, normalize_path
+from ._internal.paths import join_normalized_path, normalize_glob_pattern, normalize_path
 from .models import FileEntry, FileStats
 
 
-if TYPE_CHECKING:
-    from .view import ViewQuery
+logger = logging.getLogger(__name__)
+
+
+class FileQuery(BaseModel):
+    """Structured query contract for filesystem traversal and filtering."""
+
+    path_pattern: str = Field(
+        default="*",
+        description="Glob pattern for matching file paths (e.g., '*.py', '/data/**/*.json')",
+    )
+    recursive: bool = Field(default=True, description="Whether to search subdirectories")
+    include_content: bool = Field(default=False, description="Whether to load file contents")
+    include_stats: bool = Field(default=True, description="Whether to include file statistics")
+    regex_pattern: Optional[str] = Field(None, description="Optional regex path filter")
+    max_size: Optional[int] = Field(None, ge=0, description="Maximum file size in bytes")
+    min_size: Optional[int] = Field(None, ge=0, description="Minimum file size in bytes")
+
+    _normalized_path_pattern: str = PrivateAttr(default="*")
+    _path_matcher: re.Pattern[str] = PrivateAttr(default_factory=lambda: re.compile(".*"))
+    _regex_matcher: Optional[re.Pattern[str]] = PrivateAttr(default=None)
+
+    @staticmethod
+    def _normalize_path_pattern(pattern: str) -> str:
+        normalized = normalize_glob_pattern(pattern)
+        if "/" not in normalized:
+            normalized = f"**/{normalized}"
+        if not normalized.startswith("/"):
+            normalized = f"/{normalized}"
+        return normalized
+
+    @staticmethod
+    def _compile_glob_pattern(pattern: str) -> re.Pattern[str]:
+        pieces: list[str] = ["^"]
+        i = 0
+        while i < len(pattern):
+            if pattern[i:i + 3] == "**/":
+                pieces.append("(?:.*/)?")
+                i += 3
+            elif pattern[i:i + 2] == "**":
+                pieces.append(".*")
+                i += 2
+            elif pattern[i] == "*":
+                pieces.append("[^/]*")
+                i += 1
+            elif pattern[i] == "?":
+                pieces.append("[^/]")
+                i += 1
+            else:
+                pieces.append(re.escape(pattern[i]))
+                i += 1
+        pieces.append("$")
+        return re.compile("".join(pieces))
+
+    @model_validator(mode="after")
+    def _validate_and_prepare_matchers(self) -> "FileQuery":
+        if (
+            self.min_size is not None
+            and self.max_size is not None
+            and self.min_size > self.max_size
+        ):
+            raise ValueError("min_size must be less than or equal to max_size")
+
+        self._normalized_path_pattern = self._normalize_path_pattern(self.path_pattern)
+        self._path_matcher = self._compile_glob_pattern(self._normalized_path_pattern)
+        self._regex_matcher = re.compile(self.regex_pattern) if self.regex_pattern else None
+        return self
+
+    def matches_path(self, path: str) -> bool:
+        return bool(self._path_matcher.match(normalize_path(path)))
+
+    def matches_regex(self, path: str) -> bool:
+        if self._regex_matcher is None:
+            return True
+        return bool(self._regex_matcher.search(normalize_path(path)))
+
+    def needs_file_stats(self) -> bool:
+        return self.include_stats or self.min_size is not None or self.max_size is not None
+
+    def matches_size(self, raw_stats: Any | None) -> bool:
+        if raw_stats is None:
+            return True
+        if self.min_size is not None and raw_stats.size < self.min_size:
+            return False
+        if self.max_size is not None and raw_stats.size > self.max_size:
+            return False
+        return True
 
 
 class FileManager:
@@ -130,11 +217,57 @@ class FileManager:
         )
         return [entry.path for entry in entries]
 
-    async def query(self, query: "ViewQuery") -> list[FileEntry]:
-        """Run a ViewQuery and return matching FileEntry records."""
-        from .view import View
+    async def query(self, query: FileQuery) -> list[FileEntry]:
+        """Run a query contract and return matching FileEntry records."""
+        entries: list[FileEntry] = []
+        include_stats = query.needs_file_stats()
 
-        return await View(agent=self.agent_fs, query=query).load()
+        async for item_path, stats in self.traverse_files(
+            "/", recursive=query.recursive, include_stats=include_stats
+        ):
+            if not query.matches_path(item_path):
+                continue
+            if not query.matches_regex(item_path):
+                continue
+            if not query.matches_size(stats):
+                continue
+
+            content = None
+            if query.include_content:
+                try:
+                    content = await self.agent_fs.fs.read_file(item_path)
+                except ErrnoException as e:
+                    if e.code == "ENOENT":
+                        logger.debug("Path disappeared before read: %s", item_path)
+                        continue
+                    context = f"FileManager.query(path={item_path!r})"
+                    raise translate_agentfs_error(e, context) from e
+
+            entries.append(
+                FileEntry(
+                    path=item_path,
+                    stats=self._to_file_stats(stats) if query.include_stats and stats else None,
+                    content=content,
+                )
+            )
+
+        return entries
+
+    async def count(self, query: FileQuery) -> int:
+        """Count files matching a query contract."""
+        count = 0
+        include_stats = query.min_size is not None or query.max_size is not None
+        async for item_path, stats in self.traverse_files(
+            "/", recursive=query.recursive, include_stats=include_stats
+        ):
+            if not query.matches_path(item_path):
+                continue
+            if not query.matches_regex(item_path):
+                continue
+            if not query.matches_size(stats):
+                continue
+            count += 1
+        return count
 
     async def tree(
         self, path: str = "/", max_depth: Optional[int] = None
@@ -205,3 +338,12 @@ class FileManager:
 
                 if stats.is_file():
                     yield item_path, stats if include_stats else None
+
+    @staticmethod
+    def _to_file_stats(raw_stats: Any) -> FileStats:
+        return FileStats(
+            size=raw_stats.size,
+            mtime=raw_stats.mtime,
+            is_file=raw_stats.is_file(),
+            is_directory=raw_stats.is_directory(),
+        )
