@@ -53,18 +53,21 @@ class TestOpenBehavior:
         assert captured["options"].id is None
 
     @pytest.mark.parametrize(
-        "kwargs",
+        ("kwargs", "message"),
         [
-            {},
-            {"id": "abc", "path": "/tmp/test.db"},
-            {"id": ""},
-            {"path": ""},
-            {"id": 1},
+            ({}, None),
+            ({"id": "abc", "path": "/tmp/test.db"}, None),
+            ({"id": ""}, None),
+            ({"path": ""}, None),
+            ({"id": 1}, "Selector values must be strings"),
         ],
     )
-    async def test_open_invalid_args(self, kwargs):
-        with pytest.raises(ValidationError):
+    async def test_open_invalid_args(self, kwargs, message):
+        with pytest.raises(ValidationError) as exc_info:
             await Fsdantic.open(**kwargs)
+
+        if message is not None:
+            assert message in str(exc_info.value)
 
     async def test_open_with_options(self, monkeypatch, tmp_path):
         captured = {}
