@@ -436,11 +436,20 @@ await ops.write("logs/2026/02/run.txt", "ok")
 # Search files
 python_files = await ops.search("**/*.py")
 
-# Get typed file stats
+# Get typed file stats (same FileStats model for overlay/base)
 stats = await ops.stat("config.json")
 print(stats.size, stats.is_file, stats.is_directory)
 
-# Get directory tree
+# List directory entries (sorted deterministic order)
+names = await ops.list_dir("/src", output="name")
+full_paths = await ops.list_dir("/src", output="full")
+
+# Remove with explicit directory policy
+await ops.remove("/tmp.txt")
+await ops.remove("/build", recursive=True)
+
+# Get directory tree with stable schema
+# {"name", "path", "type", "children"}
 tree = await ops.tree("/src")
 ```
 

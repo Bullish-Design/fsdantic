@@ -319,11 +319,11 @@ def __init__(agent_fs: AgentFS, base_fs: Optional[AgentFS] = None)
 - `read_file(path, encoding?) -> str | bytes` - Read file with fallthrough
 - `write_file(path, content, encoding?) -> None` - Write file to overlay
 - `file_exists(path) -> bool` - Check existence in overlay or base
-- `list_dir(path) -> list[str]` - List directory contents
+- `list_dir(path, output?) -> list[str]` - List directory contents in deterministic sorted order (`output`: name|relative|full)
 - `search_files(pattern, recursive?) -> list[str]` - Search files by pattern
 - `stat(path) -> Stats` - Get file statistics with fallthrough
-- `remove(path) -> None` - Remove file from overlay
-- `tree(path?, max_depth?) -> dict` - Get directory tree structure
+- `remove(path, recursive=False) -> None` - Remove file or directory with explicit directory policy
+- `tree(path?, max_depth?) -> dict` - Get stable tree nodes: `{name, path, type, children}` (deterministic ordering)
 
 **Fallthrough Behavior:**
 - Read operations try overlay first, then fall through to base

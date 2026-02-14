@@ -294,28 +294,59 @@ class FileManager:
             except ErrnoException as base_error:
                 raise translate_agentfs_error(base_error, context) from base_error
 
-        return FileStats(
-            size=stats.size,
-            mtime=stats.mtime,
-            is_file=stats.is_file(),
-            is_directory=stats.is_directory(),
-        )
+        return self._to_file_stats(stats)
 
-    async def list_dir(self, path: str) -> list[str]:
-        """List directory entries at path."""
+    async def list_dir(
+        self,
+        path: str,
+        *,
+        output: Literal["name", "relative", "full"] = "name",
+    ) -> list[str]:
+        """List directory entries at path in deterministic sorted order.
+
+        Args:
+            path: Directory path to list.
+            output: Output path style for each entry:
+                - ``"name"``: base names only (e.g., ``"main.py"``)
+                - ``"relative"``: path relative to ``path`` (e.g., ``"src/main.py"``)
+                - ``"full"``: normalized absolute paths (e.g., ``"/project/main.py"``)
+        """
         path = normalize_path(path)
-        context = f"FileManager.list_dir(path={path!r})"
+        context = f"FileManager.list_dir(path={path!r}, output={output!r})"
+        if output not in {"name", "relative", "full"}:
+            raise ValueError("output must be 'name', 'relative', or 'full'")
+
         try:
             entries = await self.agent_fs.fs.readdir(path)
         except ErrnoException as e:
             raise translate_agentfs_error(e, context) from e
-        return list(entries)
 
-    async def remove(self, path: str) -> None:
-        """Remove a file path from overlay."""
+        sorted_entries = sorted(entries)
+        if output == "name" or output == "relative":
+            return sorted_entries
+        return [join_normalized_path(path, entry) for entry in sorted_entries]
+
+    async def remove(self, path: str, *, recursive: bool = False) -> None:
+        """Remove a file or directory path from overlay.
+
+        Args:
+            path: Path to remove.
+            recursive: Directory removal policy. If ``False``, removing a directory
+                fails predictably (non-empty directories raise ``DirectoryNotEmptyError``;
+                empty directories are removed). If ``True``, directories are removed
+                recursively.
+        """
         path = normalize_path(path)
-        context = f"FileManager.remove(path={path!r})"
+        context = f"FileManager.remove(path={path!r}, recursive={recursive!r})"
         try:
+            stats = await self.agent_fs.fs.stat(path)
+            if stats.is_directory():
+                if recursive:
+                    await self.agent_fs.fs.rm(path, recursive=True)
+                else:
+                    await self.agent_fs.fs.rmdir(path)
+                return
+
             await self.agent_fs.fs.unlink(path)
         except ErrnoException as e:
             raise translate_agentfs_error(e, context) from e
@@ -389,24 +420,40 @@ class FileManager:
     async def tree(
         self, path: str = "/", max_depth: Optional[int] = None
     ) -> dict[str, Any]:
-        """Return nested directory tree rooted at path."""
+        """Return a stable tree schema rooted at path.
+
+        Returns a node dictionary with the shape:
+
+        ``{ "name": str, "path": str, "type": "file"|"directory", "children": list[node] }``
+
+        * ``children`` is always present and sorted by (type, name): directories first,
+          then files, both alphabetically.
+        * file nodes always have ``children=[]``.
+        """
         path = normalize_path(path)
 
         async def walk(current_path: str, depth: int = 0) -> dict[str, Any]:
-            if max_depth is not None and depth >= max_depth:
-                return {}
+            node_name = "/" if current_path == "/" else current_path.rsplit("/", 1)[-1]
+            node: dict[str, Any] = {
+                "name": node_name,
+                "path": current_path,
+                "type": "directory",
+                "children": [],
+            }
 
-            result: dict[str, Any] = {}
+            if max_depth is not None and depth >= max_depth:
+                return node
 
             try:
                 entries = await self.agent_fs.fs.readdir(current_path)
             except ErrnoException as e:
                 if e.code == "ENOENT":
-                    return result
+                    return node
                 context = f"FileManager.tree(path={path!r}, current_path={current_path!r})"
                 raise translate_agentfs_error(e, context) from e
 
-            for entry_name in entries:
+            children: list[dict[str, Any]] = []
+            for entry_name in sorted(entries):
                 entry_path = join_normalized_path(current_path, entry_name)
                 try:
                     stat = await self.agent_fs.fs.stat(entry_path)
@@ -419,11 +466,19 @@ class FileManager:
                     raise translate_agentfs_error(e, context) from e
 
                 if stat.is_directory():
-                    result[entry_name] = await walk(entry_path, depth + 1)
+                    children.append(await walk(entry_path, depth + 1))
                 else:
-                    result[entry_name] = None
+                    children.append(
+                        {
+                            "name": entry_name,
+                            "path": entry_path,
+                            "type": "file",
+                            "children": [],
+                        }
+                    )
 
-            return result
+            node["children"] = sorted(children, key=lambda c: (c["type"] != "directory", c["name"]))
+            return node
 
         return await walk(path)
 
