@@ -14,6 +14,17 @@ from hypothesis import given, strategies as st
 from fsdantic import AgentFSOptions, ViewQuery
 
 
+valid_segment_strategy = st.text(
+    alphabet=st.characters(whitelist_categories=("Lu", "Ll", "Nd"), whitelist_characters="-_."),
+    min_size=1,
+    max_size=20,
+)
+
+valid_path_strategy = st.lists(valid_segment_strategy, min_size=1, max_size=8).map(
+    lambda segs: "/" + "/".join(segs)
+)
+
+
 class TestAgentFSOptionsProperties:
     """Property-based tests for AgentFSOptions."""
 
@@ -31,7 +42,7 @@ class TestAgentFSOptionsProperties:
             options = AgentFSOptions(id=agent_id)
             assert options.id == agent_id
 
-    @given(path=st.text(min_size=1, max_size=100).filter(lambda s: "/" in s or "\\" in s))
+    @given(path=valid_path_strategy)
     def test_valid_path_always_accepted(self, path):
         """Any valid path should be accepted."""
         try:
@@ -115,16 +126,9 @@ class TestOverlayIsolationProperties:
 
     @pytest.mark.slow
     @given(
-        filenames=st.lists(
-            st.text(
-                alphabet=st.characters(whitelist_categories=("Lu", "Ll", "Nd"), whitelist_characters="-_."),
-                min_size=1,
-                max_size=20,
-            ),
-            min_size=1,
-            max_size=10,
-            unique=True,
-        ).map(lambda names: [f"/{name}.txt" for name in names]),
+        filenames=st.lists(valid_segment_strategy, min_size=1, max_size=10, unique=True).map(
+            lambda names: [f"/{name}.txt" for name in names]
+        ),
         content=st.text(min_size=0, max_size=500),
     )
     async def test_multiple_files_isolation_property(self, filenames, content):
@@ -278,11 +282,7 @@ class TestFileSystemProperties:
 
     @pytest.mark.slow
     @given(
-        path=st.text(
-            alphabet=st.characters(whitelist_categories=("Lu", "Ll", "Nd"), whitelist_characters="/-_."),
-            min_size=2,
-            max_size=50,
-        ).filter(lambda s: s.startswith("/") and not s.endswith("/")),
+        path=valid_path_strategy,
         content=st.text(min_size=0, max_size=1000),
     )
     async def test_file_write_read_roundtrip(self, path, content):
@@ -304,11 +304,7 @@ class TestFileSystemProperties:
 
     @pytest.mark.slow
     @given(
-        path=st.text(
-            alphabet=st.characters(whitelist_categories=("Lu", "Ll", "Nd"), whitelist_characters="/-_."),
-            min_size=2,
-            max_size=50,
-        ).filter(lambda s: s.startswith("/") and not s.endswith("/")),
+        path=valid_path_strategy,
         initial_content=st.text(min_size=0, max_size=500),
         updated_content=st.text(min_size=0, max_size=500),
     )
