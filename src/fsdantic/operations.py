@@ -1,11 +1,10 @@
 """High-level file operations with overlay fallthrough."""
 
-from pathlib import Path
 from typing import Any, Optional
 
 from agentfs_sdk import AgentFS, ErrnoException
 
-from ._internal.errors import handle_agentfs_errors
+from ._internal.errors import translate_agentfs_error
 from .models import FileStats
 from .view import View, ViewQuery
 
@@ -33,7 +32,6 @@ class FileOperations:
         self.agent_fs = agent_fs
         self.base_fs = base_fs
 
-    @handle_agentfs_errors
     async def read_file(
         self, path: str, *, encoding: Optional[str] = "utf-8"
     ) -> str | bytes:
@@ -54,19 +52,23 @@ class FileOperations:
             >>> binary = await ops.read_file("image.png", encoding=None)
         """
         # Try overlay first
+        context = f"FileOperations.read_file(path={path!r})"
+
         try:
             content = await self.agent_fs.fs.read_file(path, encoding=encoding)
         except ErrnoException as e:
             if e.code != "ENOENT":
-                raise
+                raise translate_agentfs_error(e, context) from e
             # Fallthrough to base
             if self.base_fs is None:
-                raise
-            content = await self.base_fs.fs.read_file(path, encoding=encoding)
+                raise translate_agentfs_error(e, context) from e
+            try:
+                content = await self.base_fs.fs.read_file(path, encoding=encoding)
+            except ErrnoException as base_error:
+                raise translate_agentfs_error(base_error, context) from base_error
 
         return content
 
-    @handle_agentfs_errors
     async def write_file(
         self, path: str, content: str | bytes, *, encoding: str = "utf-8"
     ) -> None:
@@ -86,9 +88,12 @@ class FileOperations:
             content = content.encode(encoding)
 
         # Always write to overlay
-        await self.agent_fs.fs.write_file(path, content)
+        context = f"FileOperations.write_file(path={path!r})"
+        try:
+            await self.agent_fs.fs.write_file(path, content)
+        except ErrnoException as e:
+            raise translate_agentfs_error(e, context) from e
 
-    @handle_agentfs_errors
     async def file_exists(self, path: str) -> bool:
         """Check if file exists in overlay or base.
 
@@ -102,23 +107,24 @@ class FileOperations:
             >>> if await ops.file_exists("config.json"):
             ...     print("Config exists")
         """
+        context = f"FileOperations.file_exists(path={path!r})"
+
         try:
             await self.agent_fs.fs.stat(path)
             return True
         except ErrnoException as e:
             if e.code != "ENOENT":
-                raise
+                raise translate_agentfs_error(e, context) from e
             if self.base_fs:
                 try:
                     await self.base_fs.fs.stat(path)
                     return True
                 except ErrnoException as base_err:
                     if base_err.code != "ENOENT":
-                        raise
+                        raise translate_agentfs_error(base_err, context) from base_err
                     pass
             return False
 
-    @handle_agentfs_errors
     async def list_dir(self, path: str) -> list[str]:
         """List directory contents from overlay.
 
@@ -135,7 +141,11 @@ class FileOperations:
             >>> for entry in entries:
             ...     print(entry)
         """
-        entries = await self.agent_fs.fs.readdir(path)
+        context = f"FileOperations.list_dir(path={path!r})"
+        try:
+            entries = await self.agent_fs.fs.readdir(path)
+        except ErrnoException as e:
+            raise translate_agentfs_error(e, context) from e
         return list(entries)
 
     async def search_files(self, pattern: str, recursive: bool = True) -> list[str]:
@@ -165,7 +175,6 @@ class FileOperations:
         files = await view.load()
         return [f.path for f in files]
 
-    @handle_agentfs_errors
     async def stat(self, path: str) -> FileStats:
         """Get file statistics.
 
@@ -179,6 +188,8 @@ class FileOperations:
             >>> stat = await ops.stat("file.txt")
             >>> print(f"Size: {stat.size} bytes")
         """
+        context = f"FileOperations.stat(path={path!r})"
+
         try:
             stats = await self.agent_fs.fs.stat(path)
             return FileStats(
@@ -189,18 +200,20 @@ class FileOperations:
             )
         except ErrnoException as e:
             if e.code != "ENOENT":
-                raise
+                raise translate_agentfs_error(e, context) from e
             if self.base_fs:
-                stats = await self.base_fs.fs.stat(path)
+                try:
+                    stats = await self.base_fs.fs.stat(path)
+                except ErrnoException as base_error:
+                    raise translate_agentfs_error(base_error, context) from base_error
                 return FileStats(
                     size=stats.size,
                     mtime=stats.mtime,
                     is_file=stats.is_file(),
                     is_directory=stats.is_directory(),
                 )
-            raise
+            raise translate_agentfs_error(e, context) from e
 
-    @handle_agentfs_errors
     async def remove(self, path: str) -> None:
         """Remove a file from overlay.
 
@@ -217,9 +230,12 @@ class FileOperations:
         Examples:
             >>> await ops.remove("temp.txt")
         """
-        await self.agent_fs.fs.unlink(path)
+        context = f"FileOperations.remove(path={path!r})"
+        try:
+            await self.agent_fs.fs.unlink(path)
+        except ErrnoException as e:
+            raise translate_agentfs_error(e, context) from e
 
-    @handle_agentfs_errors
     async def tree(
         self, path: str = "/", max_depth: Optional[int] = None
     ) -> dict[str, Any]:
@@ -259,12 +275,18 @@ class FileOperations:
                         if e.code == "ENOENT":
                             pass
                         else:
-                            raise
+                            context = (
+                                f"FileOperations.tree(path={path!r}, current_path={current_path!r})"
+                            )
+                            raise translate_agentfs_error(e, context) from e
             except ErrnoException as e:
                 if e.code == "ENOENT":
                     pass
                 else:
-                    raise
+                    context = (
+                        f"FileOperations.tree(path={path!r}, current_path={current_path!r})"
+                    )
+                    raise translate_agentfs_error(e, context) from e
 
             return result
 
