@@ -1,6 +1,6 @@
 # Fsdantic Technical Specification
 
-**Version:** 0.2.0
+**Version:** 0.3.0
 **Date:** 2026-02-14
 **Status:** Active Development
 
@@ -447,6 +447,10 @@ files = await ops.search_files("**/*.py")
 ---
 
 ## Version History
+
+### 0.3.0 (2026-02-14)
+- **Breaking:** Curated and tightened top-level import surface in `fsdantic.__init__`; consumers should import only names included in `fsdantic.__all__`.
+- Added explicit export boundaries for supported managers, models, and exception hierarchy.
 
 ### 0.2.0 (2026-02-14)
 - Added repository pattern (`TypedKVRepository`, `NamespacedKVStore`)

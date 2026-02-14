@@ -321,9 +321,9 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-## New in Version 0.2.0
+## New in Version 0.3.0
 
-Fsdantic 0.2.0 introduces powerful new abstractions based on common usage patterns:
+Fsdantic 0.3.0 introduces a curated public import surface (breaking for undocumented imports) and retains the powerful abstractions introduced in prior releases:
 
 ### Repository Pattern
 
