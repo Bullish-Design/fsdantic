@@ -52,7 +52,7 @@ from .repository import NamespacedKVStore, TypedKVRepository
 from .workspace import Workspace
 from .view import SearchMatch, View, ViewQuery
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     # Core models
