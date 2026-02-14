@@ -9,6 +9,9 @@ import os
 import tempfile
 import time
 from collections.abc import Awaitable, Callable
+from pathlib import Path
+import json
+import statistics
 
 import pytest
 from agentfs_sdk import AgentFS, AgentFSOptions as SDKAgentFSOptions
@@ -17,6 +20,7 @@ from fsdantic import View, ViewQuery
 
 
 STRICT_BENCHMARKS = os.getenv("FSDANTIC_STRICT_BENCHMARKS", "0") == "1"
+BENCHMARK_OUTPUT_PATH = os.getenv("FSDANTIC_BENCHMARK_OUTPUT")
 
 
 @pytest.fixture
@@ -43,6 +47,38 @@ async def _average_ms(iterations: int, op: Callable[[int], Awaitable[object]]) -
         await op(i)
     duration = time.perf_counter() - start
     return (duration / iterations) * 1000
+
+
+async def _median_ms(iterations: int, op: Callable[[int], Awaitable[object]]) -> float:
+    """Measure median execution time (ms) for async operation."""
+    samples: list[float] = []
+    for i in range(iterations):
+        start = time.perf_counter()
+        await op(i)
+        samples.append((time.perf_counter() - start) * 1000)
+    return statistics.median(samples)
+
+
+def _record_benchmark_metric(scenario: str, median_ms: float) -> None:
+    """Persist benchmark metric so external gate tooling can parse it."""
+    if not BENCHMARK_OUTPUT_PATH:
+        return
+
+    output_path = Path(BENCHMARK_OUTPUT_PATH)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    payload: dict[str, object]
+    if output_path.exists():
+        payload = json.loads(output_path.read_text(encoding="utf-8"))
+    else:
+        payload = {"schema_version": 1, "unit": "ms", "scenarios": {}}
+
+    scenarios = payload.setdefault("scenarios", {})
+    if not isinstance(scenarios, dict):
+        raise ValueError("Invalid benchmark artifact format: scenarios must be an object")
+
+    scenarios[scenario] = {"median_ms": round(median_ms, 4)}
+    output_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
 @pytest.mark.asyncio
@@ -107,6 +143,11 @@ class TestMicrobenchmarks:
             iterations=200,
             op=lambda i: perf_agent.fs.write_file(f"/file_{i}.txt", b"test content"),
         )
+        median_ms = await _median_ms(
+            iterations=200,
+            op=lambda i: perf_agent.fs.write_file(f"/median_file_{i}.txt", b"test content"),
+        )
+        _record_benchmark_metric("file_write_average_latency", median_ms)
 
         target_ms = _target(default_ms=25.0, strict_ms=10.0)
         assert avg_ms < target_ms, (
@@ -124,6 +165,11 @@ class TestMicrobenchmarks:
             iterations=300,
             op=lambda i: perf_agent.fs.read_file(f"/file_{i}.txt"),
         )
+        median_ms = await _median_ms(
+            iterations=300,
+            op=lambda i: perf_agent.fs.read_file(f"/file_{i}.txt"),
+        )
+        _record_benchmark_metric("file_read_average_latency", median_ms)
 
         target_ms = _target(default_ms=25.0, strict_ms=10.0)
         assert avg_ms < target_ms, (
@@ -138,12 +184,17 @@ class TestMicrobenchmarks:
         warmup = View(agent=perf_agent, query=ViewQuery(path_pattern="*.py", include_content=False))
         await warmup.load()
 
-        start = time.perf_counter()
-        files = await View(
-            agent=perf_agent,
-            query=ViewQuery(path_pattern="*.py", include_content=False),
-        ).load()
-        duration_ms = (time.perf_counter() - start) * 1000
+        samples: list[float] = []
+        files = []
+        for _ in range(5):
+            start = time.perf_counter()
+            files = await View(
+                agent=perf_agent,
+                query=ViewQuery(path_pattern="*.py", include_content=False),
+            ).load()
+            samples.append((time.perf_counter() - start) * 1000)
+        duration_ms = statistics.median(samples)
+        _record_benchmark_metric("view_query_without_content_latency", duration_ms)
 
         assert len(files) == 1500
         target_ms = _target(default_ms=600.0, strict_ms=150.0)
@@ -158,9 +209,14 @@ class TestMicrobenchmarks:
 
         await View(agent=perf_agent, query=ViewQuery(path_pattern="*")).count()
 
-        start = time.perf_counter()
-        count = await View(agent=perf_agent, query=ViewQuery(path_pattern="*")).count()
-        duration_ms = (time.perf_counter() - start) * 1000
+        samples: list[float] = []
+        count = 0
+        for _ in range(5):
+            start = time.perf_counter()
+            count = await View(agent=perf_agent, query=ViewQuery(path_pattern="*")).count()
+            samples.append((time.perf_counter() - start) * 1000)
+        duration_ms = statistics.median(samples)
+        _record_benchmark_metric("view_count_latency", duration_ms)
 
         assert count == 2000
         target_ms = _target(default_ms=700.0, strict_ms=200.0)
