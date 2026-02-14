@@ -1,5 +1,6 @@
 """View interface for querying AgentFS filesystem."""
 
+import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -10,6 +11,9 @@ from agentfs_sdk import AgentFS
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
 from .models import FileEntry, FileStats
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -234,54 +238,53 @@ class View(BaseModel):
         try:
             # List directory contents
             items = await self.agent.fs.readdir(path)
+        except FileNotFoundError:
+            logger.debug("Directory disappeared during scan: %s", path)
+            return
 
-            for item in items:
-                # Construct full path
-                item_path = f"{path.rstrip('/')}/{item}"
+        for item in items:
+            # Construct full path
+            item_path = f"{path.rstrip('/')}/{item}"
 
-                try:
-                    # Get file stats
-                    stats = await self.agent.fs.stat(item_path)
+            try:
+                # Get file stats
+                stats = await self.agent.fs.stat(item_path)
+            except FileNotFoundError:
+                logger.debug("Path disappeared before stat: %s", item_path)
+                continue
 
-                    # Convert to our FileStats model
-                    file_stats = FileStats(
-                        size=stats.size,
-                        mtime=stats.mtime,
-                        is_file=stats.is_file(),
-                        is_directory=stats.is_dir()
+            # Convert to our FileStats model
+            file_stats = FileStats(
+                size=stats.size,
+                mtime=stats.mtime,
+                is_file=stats.is_file(),
+                is_directory=stats.is_directory(),
+            )
+
+            if file_stats.is_directory:
+                # Recursively scan subdirectory if enabled
+                if self.query.recursive:
+                    await self._scan_directory(item_path, entries)
+            elif file_stats.is_file:
+                # Check if file matches pattern
+                if self._matches_pattern(item_path):
+                    # Load content if requested
+                    content = None
+                    if self.query.include_content:
+                        try:
+                            content = await self.agent.fs.read_file(item_path)
+                        except FileNotFoundError:
+                            logger.debug("Path disappeared before read: %s", item_path)
+                        except Exception:
+                            logger.exception("Failed reading file content for %s", item_path)
+
+                    # Create entry
+                    entry = FileEntry(
+                        path=item_path,
+                        stats=file_stats if self.query.include_stats else None,
+                        content=content,
                     )
-
-                    if file_stats.is_directory:
-                        # Recursively scan subdirectory if enabled
-                        if self.query.recursive:
-                            await self._scan_directory(item_path, entries)
-                    elif file_stats.is_file:
-                        # Check if file matches pattern
-                        if self._matches_pattern(item_path):
-                            # Load content if requested
-                            content = None
-                            if self.query.include_content:
-                                try:
-                                    content = await self.agent.fs.read_file(item_path)
-                                except Exception:
-                                    # If content loading fails, continue without it
-                                    content = None
-
-                            # Create entry
-                            entry = FileEntry(
-                                path=item_path,
-                                stats=file_stats if self.query.include_stats else None,
-                                content=content
-                            )
-                            entries.append(entry)
-
-                except Exception:
-                    # Skip files that can't be accessed
-                    continue
-
-        except Exception:
-            # Skip directories that can't be accessed
-            pass
+                    entries.append(entry)
 
     def _matches_pattern(self, path: str) -> bool:
         """Check if a path matches the query pattern.
