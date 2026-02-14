@@ -431,6 +431,10 @@ await ops.write_file("output.txt", "Hello World")
 # Search files
 python_files = await ops.search_files("**/*.py")
 
+# Get typed file stats
+stats = await ops.stat("config.json")
+print(stats.size, stats.is_file, stats.is_directory)
+
 # Get directory tree
 tree = await ops.tree("/src")
 ```

@@ -5,6 +5,7 @@ from typing import Any, Optional
 
 from agentfs_sdk import AgentFS, ErrnoException
 
+from .models import FileStats
 from .view import View, ViewQuery
 
 
@@ -159,26 +160,38 @@ class FileOperations:
         files = await view.load()
         return [f.path for f in files]
 
-    async def stat(self, path: str) -> Any:
+    async def stat(self, path: str) -> FileStats:
         """Get file statistics.
 
         Args:
             path: File path
 
         Returns:
-            File stat object
+            File statistics model
 
         Examples:
             >>> stat = await ops.stat("file.txt")
             >>> print(f"Size: {stat.size} bytes")
         """
         try:
-            return await self.agent_fs.fs.stat(path)
+            stats = await self.agent_fs.fs.stat(path)
+            return FileStats(
+                size=stats.size,
+                mtime=stats.mtime,
+                is_file=stats.is_file(),
+                is_directory=stats.is_directory(),
+            )
         except ErrnoException as e:
             if e.code != "ENOENT":
                 raise
             if self.base_fs:
-                return await self.base_fs.fs.stat(path)
+                stats = await self.base_fs.fs.stat(path)
+                return FileStats(
+                    size=stats.size,
+                    mtime=stats.mtime,
+                    is_file=stats.is_file(),
+                    is_directory=stats.is_directory(),
+                )
             raise
 
     async def remove(self, path: str) -> None:

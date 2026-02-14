@@ -3,7 +3,7 @@
 import pytest
 from agentfs_sdk import ErrnoException
 
-from fsdantic import FileOperations
+from fsdantic import FileOperations, FileStats
 
 
 @pytest.mark.asyncio
@@ -107,8 +107,9 @@ class TestFileOperations:
 
         stats = await ops.stat("/test.txt")
 
+        assert isinstance(stats, FileStats)
         assert stats.size == len(content.encode("utf-8"))
-        assert stats.is_file()
+        assert stats.is_file
         assert not stats.is_dir()
 
     async def test_remove(self, agent_fs):
