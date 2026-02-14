@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, Optional
 from agentfs_sdk import AgentFS, ErrnoException
 
 from ._internal.errors import translate_agentfs_error
+from ._internal.paths import join_normalized_path, normalize_path
 from .models import FileEntry, FileStats
 
 
@@ -22,6 +23,7 @@ class FileManager:
 
     async def read(self, path: str, *, encoding: Optional[str] = "utf-8") -> str | bytes:
         """Read a file with overlay-first and optional base fallthrough semantics."""
+        path = normalize_path(path)
         context = f"FileManager.read(path={path!r})"
 
         try:
@@ -39,6 +41,7 @@ class FileManager:
 
     async def write(self, path: str, content: str | bytes, *, encoding: str = "utf-8") -> None:
         """Write a file to overlay filesystem only."""
+        path = normalize_path(path)
         if isinstance(content, str):
             content = content.encode(encoding)
 
@@ -50,6 +53,7 @@ class FileManager:
 
     async def exists(self, path: str) -> bool:
         """Check whether a path exists in overlay or base."""
+        path = normalize_path(path)
         context = f"FileManager.exists(path={path!r})"
 
         try:
@@ -71,6 +75,7 @@ class FileManager:
 
     async def stat(self, path: str) -> FileStats:
         """Return typed file stats from overlay with optional base fallthrough."""
+        path = normalize_path(path)
         context = f"FileManager.stat(path={path!r})"
 
         try:
@@ -94,6 +99,7 @@ class FileManager:
 
     async def list_dir(self, path: str) -> list[str]:
         """List directory entries at path."""
+        path = normalize_path(path)
         context = f"FileManager.list_dir(path={path!r})"
         try:
             entries = await self.agent_fs.fs.readdir(path)
@@ -103,6 +109,7 @@ class FileManager:
 
     async def remove(self, path: str) -> None:
         """Remove a file path from overlay."""
+        path = normalize_path(path)
         context = f"FileManager.remove(path={path!r})"
         try:
             await self.agent_fs.fs.unlink(path)
@@ -133,6 +140,7 @@ class FileManager:
         self, path: str = "/", max_depth: Optional[int] = None
     ) -> dict[str, Any]:
         """Return nested directory tree rooted at path."""
+        path = normalize_path(path)
 
         async def walk(current_path: str, depth: int = 0) -> dict[str, Any]:
             if max_depth is not None and depth >= max_depth:
@@ -149,7 +157,7 @@ class FileManager:
                 raise translate_agentfs_error(e, context) from e
 
             for entry_name in entries:
-                entry_path = f"{current_path.rstrip('/')}/{entry_name}"
+                entry_path = join_normalized_path(current_path, entry_name)
                 try:
                     stat = await self.agent_fs.fs.stat(entry_path)
                 except ErrnoException as e:
@@ -173,6 +181,7 @@ class FileManager:
         self, root: str = "/", *, recursive: bool = True, include_stats: bool = False
     ) -> AsyncIterator[tuple[str, Any | None]]:
         """Traverse filesystem and yield file paths with optional raw stats."""
+        root = normalize_path(root)
         pending = [root]
 
         while pending:
@@ -183,7 +192,7 @@ class FileManager:
                 continue
 
             for item in items:
-                item_path = f"{path.rstrip('/')}/{item}"
+                item_path = join_normalized_path(path, item)
                 try:
                     stats = await self.agent_fs.fs.stat(item_path)
                 except FileNotFoundError:
@@ -196,4 +205,3 @@ class FileManager:
 
                 if stats.is_file():
                     yield item_path, stats if include_stats else None
-

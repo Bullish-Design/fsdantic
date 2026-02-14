@@ -157,6 +157,43 @@ class TestFileManager:
         assert "file3.txt" in tree["dir1"]
         assert "subdir" in tree["dir1"]
 
+
+    async def test_methods_normalize_paths(self, agent_fs):
+        """Path-accepting methods should normalize input paths."""
+        ops = FileManager(agent_fs)
+
+        await ops.write("nested//./dir/../dir/file.txt", "normalized")
+
+        assert await ops.exists("nested/dir/file.txt") is True
+        assert await ops.read("/nested/dir/./file.txt") == "normalized"
+
+        stats = await ops.stat("nested/dir/file.txt")
+        assert stats.is_file is True
+
+        listed = await ops.list_dir("nested//dir//")
+        assert "file.txt" in listed
+
+        await ops.remove("nested/dir/./file.txt")
+        assert await ops.exists("/nested/dir/file.txt") is False
+
+    async def test_search_and_query_return_normalized_paths(self, agent_fs):
+        """Search/query output paths should be consistently normalized."""
+        ops = FileManager(agent_fs)
+
+        await ops.write("/alpha//beta/./file.txt", "x")
+        await ops.write("/alpha/beta/../beta/other.py", "print('x')")
+
+        txt = await ops.search("alpha//**/*.txt")
+        assert txt == ["/alpha/beta/file.txt"]
+
+        from fsdantic import ViewQuery
+
+        entries = await ops.query(ViewQuery(path_pattern="alpha//**/*"))
+        assert {entry.path for entry in entries} == {
+            "/alpha/beta/file.txt",
+            "/alpha/beta/other.py",
+        }
+
     async def test_tree_with_max_depth(self, agent_fs):
         """Should respect max_depth parameter."""
         ops = FileManager(agent_fs)

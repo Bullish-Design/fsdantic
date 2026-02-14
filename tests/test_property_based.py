@@ -404,3 +404,32 @@ class TestViewQueryProperties:
 
         assert query.matches_path(nested_path) is True
         assert query.matches_path(non_matching_path) is False
+
+
+class TestPathNormalizationProperties:
+    """Property-based tests for path normalization invariants."""
+
+    @given(
+        parts=st.lists(valid_segment_strategy, min_size=1, max_size=6),
+        leading=st.sampled_from(["", "/", "//"]),
+        trailing=st.sampled_from(["", "/", "//"]),
+    )
+    def test_equivalent_paths_match_same_entries(self, parts, leading, trailing):
+        """Equivalent paths should normalize to the same canonical path."""
+        from fsdantic._internal.paths import normalize_path
+
+        joined = "/".join(parts)
+        noisy = f"{leading}{joined}{trailing}"
+
+        assert normalize_path(noisy) == normalize_path(joined)
+
+    @given(path=st.text(min_size=0, max_size=80))
+    def test_viewquery_path_matching_uses_normalized_paths(self, path):
+        """Path matching should be invariant to duplicate separators and dots."""
+        from fsdantic._internal.paths import normalize_path
+
+        query = ViewQuery(path_pattern="*.txt")
+        canonical = normalize_path(path)
+        noisy = canonical.replace("/", "//")
+
+        assert query.matches_path(noisy) == query.matches_path(canonical)
