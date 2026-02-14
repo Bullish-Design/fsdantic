@@ -318,7 +318,8 @@ class TestOverlayOperationsEdgeCases:
         ops = OverlayOperations()
         result = await ops.merge(agent_fs, stable_fs)
 
-        merged_content = await stable_fs.fs.read_file("/binary.dat")
+        # Default read_file() returns text, so request bytes explicitly for binary assertions.
+        merged_content = await stable_fs.fs.read_file("/binary.dat", encoding=None)
         assert merged_content == binary
 
     async def test_merge_large_files(self, agent_fs, stable_fs):
