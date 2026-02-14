@@ -1,15 +1,20 @@
+from __future__ import annotations
+
 """Workspace materialization for AgentFS overlays."""
 
 import shutil
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from agentfs_sdk import AgentFS, ErrnoException
 
 from ._internal.errors import translate_agentfs_error
 from .view import ViewQuery
+
+if TYPE_CHECKING:
+    from .workspace import Workspace
 
 
 class ConflictResolution(str, Enum):
@@ -354,3 +359,58 @@ class Materializer:
 
         await walk(path)
         return files
+
+
+class MaterializationManager:
+    """Workspace-facing materialization API backed by :class:`Materializer`."""
+
+    def __init__(self, agent_fs: AgentFS, materializer: Optional[Materializer] = None):
+        self._agent_fs = agent_fs
+        self._materializer = materializer or Materializer()
+
+    @staticmethod
+    def _resolve_agentfs(source: AgentFS | "Workspace") -> AgentFS:
+        """Resolve either Workspace or raw AgentFS into AgentFS."""
+        raw = getattr(source, "raw", source)
+        return raw
+
+    async def to_disk(
+        self,
+        target_path: Path,
+        *,
+        base: AgentFS | "Workspace" | None = None,
+        filters: Optional[ViewQuery] = None,
+        clean: bool = True,
+    ) -> MaterializationResult:
+        """Materialize this workspace to disk, optionally layering a base workspace."""
+        base_fs = self._resolve_agentfs(base) if base is not None else None
+        return await self._materializer.materialize(
+            agent_fs=self._agent_fs,
+            target_path=target_path,
+            base_fs=base_fs,
+            filters=filters,
+            clean=clean,
+        )
+
+    async def diff(
+        self,
+        base: AgentFS | "Workspace",
+        *,
+        path: str = "/",
+    ) -> list[FileChange]:
+        """Diff this workspace against ``base`` within ``path``."""
+        base_fs = self._resolve_agentfs(base)
+        return await self._materializer.diff(
+            overlay_fs=self._agent_fs,
+            base_fs=base_fs,
+            path=path,
+        )
+
+    async def preview(
+        self,
+        base: AgentFS | "Workspace",
+        *,
+        path: str = "/",
+    ) -> list[FileChange]:
+        """Preview materialization changes (alias of :meth:`diff`)."""
+        return await self.diff(base=base, path=path)

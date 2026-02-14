@@ -4,8 +4,8 @@ from agentfs_sdk import AgentFS
 
 from .files import FileManager
 from .kv import KVManager
-from .materialization import Materializer
-from .overlay import OverlayOperations
+from .materialization import MaterializationManager
+from .overlay import OverlayManager
 
 
 class Workspace:
@@ -15,8 +15,8 @@ class Workspace:
         self._raw = raw
         self._files: FileManager | None = None
         self._kv: KVManager | None = None
-        self._overlay: OverlayOperations | None = None
-        self._materialize: Materializer | None = None
+        self._overlay: OverlayManager | None = None
+        self._materialize: MaterializationManager | None = None
         self._closed = False
 
     @property
@@ -39,17 +39,17 @@ class Workspace:
         return self._kv
 
     @property
-    def overlay(self) -> OverlayOperations:
-        """Lazy overlay operations manager."""
+    def overlay(self) -> OverlayManager:
+        """Lazy overlay manager."""
         if self._overlay is None:
-            self._overlay = OverlayOperations()
+            self._overlay = OverlayManager(self._raw)
         return self._overlay
 
     @property
-    def materialize(self) -> Materializer:
+    def materialize(self) -> MaterializationManager:
         """Lazy materialization manager."""
         if self._materialize is None:
-            self._materialize = Materializer()
+            self._materialize = MaterializationManager(self._raw)
         return self._materialize
 
     async def close(self) -> None:

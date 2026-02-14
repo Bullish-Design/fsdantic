@@ -1,12 +1,17 @@
+from __future__ import annotations
+
 """High-level operations for AgentFS overlay filesystems."""
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Protocol
+from typing import TYPE_CHECKING, Optional, Protocol
 
 from agentfs_sdk import AgentFS, ErrnoException
 
 from ._internal.errors import translate_agentfs_error
+
+if TYPE_CHECKING:
+    from .workspace import Workspace
 
 
 class MergeStrategy(str, Enum):
@@ -381,3 +386,44 @@ class OverlayOperations:
             )
 
         return removed
+
+
+class OverlayManager:
+    """Workspace-facing overlay API backed by :class:`OverlayOperations`."""
+
+    def __init__(
+        self,
+        agent_fs: AgentFS,
+        operations: Optional[OverlayOperations] = None,
+    ):
+        self._agent_fs = agent_fs
+        self._operations = operations or OverlayOperations()
+
+    @staticmethod
+    def _resolve_agentfs(source: AgentFS | "Workspace") -> AgentFS:
+        """Resolve either Workspace or raw AgentFS into AgentFS."""
+        raw = getattr(source, "raw", source)
+        return raw
+
+    async def merge(
+        self,
+        source: AgentFS | "Workspace",
+        path: str = "/",
+        strategy: Optional[MergeStrategy] = None,
+    ) -> MergeResult:
+        """Merge ``source`` into this workspace's backing filesystem."""
+        source_fs = self._resolve_agentfs(source)
+        return await self._operations.merge(
+            source=source_fs,
+            target=self._agent_fs,
+            path=path,
+            strategy=strategy,
+        )
+
+    async def list_changes(self, path: str = "/") -> list[str]:
+        """List changed files currently present in this workspace overlay."""
+        return await self._operations.list_changes(self._agent_fs, path=path)
+
+    async def reset(self, paths: Optional[list[str]] = None) -> int:
+        """Reset selected paths (or all paths) in this workspace overlay."""
+        return await self._operations.reset_overlay(self._agent_fs, paths=paths)
