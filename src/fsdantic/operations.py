@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Any, Optional
 
-from agentfs_sdk import AgentFS
+from agentfs_sdk import AgentFS, ErrnoException
 
 from .view import View, ViewQuery
 
@@ -51,7 +51,9 @@ class FileOperations:
         # Try overlay first
         try:
             content = await self.agent_fs.fs.read_file(path)
-        except FileNotFoundError:
+        except ErrnoException as e:
+            if e.code != "ENOENT":
+                raise
             # Fallthrough to base
             if self.base_fs is None:
                 raise
@@ -99,12 +101,16 @@ class FileOperations:
         try:
             await self.agent_fs.fs.stat(path)
             return True
-        except FileNotFoundError:
+        except ErrnoException as e:
+            if e.code != "ENOENT":
+                raise
             if self.base_fs:
                 try:
                     await self.base_fs.fs.stat(path)
                     return True
-                except FileNotFoundError:
+                except ErrnoException as base_err:
+                    if base_err.code != "ENOENT":
+                        raise
                     pass
             return False
 
@@ -169,7 +175,9 @@ class FileOperations:
         """
         try:
             return await self.agent_fs.fs.stat(path)
-        except FileNotFoundError:
+        except ErrnoException as e:
+            if e.code != "ENOENT":
+                raise
             if self.base_fs:
                 return await self.base_fs.fs.stat(path)
             raise
@@ -222,10 +230,16 @@ class FileOperations:
                             result[entry_name] = await walk(entry_path, depth + 1)
                         else:
                             result[entry_name] = None  # File (leaf node)
-                    except FileNotFoundError:
-                        pass
-            except FileNotFoundError:
-                pass
+                    except ErrnoException as e:
+                        if e.code == "ENOENT":
+                            pass
+                        else:
+                            raise
+            except ErrnoException as e:
+                if e.code == "ENOENT":
+                    pass
+                else:
+                    raise
 
             return result
 
