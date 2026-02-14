@@ -4,6 +4,7 @@ import pytest
 from pydantic import BaseModel
 
 from fsdantic import KVRecord, TypedKVRepository, VersionedKVRecord, NamespacedKVStore
+from fsdantic.kv import KVManager
 
 
 class UserRecord(BaseModel):
@@ -229,6 +230,47 @@ class TestTypedKVRepository:
         loaded = await repo.load("alice", UserRecord)
         assert loaded is not None
         assert loaded.name == "Alice"
+
+
+@pytest.mark.asyncio
+class TestManagerRepositoryEquivalents:
+    """Repository behavior through KVManager.repository."""
+
+    async def test_manager_repository_save_and_load(self, agent_fs):
+        manager = KVManager(agent_fs, prefix="app:")
+        repo = manager.repository(prefix="user:", model_type=UserRecord)
+
+        user = UserRecord(name="Alice", email="alice@example.com", age=30)
+        await repo.save("alice", user)
+
+        loaded = await repo.load("alice")
+        assert loaded is not None
+        assert loaded.name == "Alice"
+
+    async def test_manager_repository_namespace_composition(self, agent_fs):
+        manager = KVManager(agent_fs, prefix="app:")
+        users = manager.namespace("user:")
+        repo = users.repository(prefix="prefs:", model_type=ConfigRecord)
+
+        await repo.save("alice", ConfigRecord(theme="dark", notifications=True))
+
+        raw = await manager.get("user:prefs:alice")
+        assert raw["theme"] == "dark"
+
+    async def test_manager_repository_list_all_and_load_batch(self, agent_fs):
+        manager = KVManager(agent_fs, prefix="app:")
+        repo = manager.repository(prefix="user:", model_type=UserRecord)
+
+        await repo.save("alice", UserRecord(name="Alice", email="alice@example.com", age=30))
+        await repo.save("bob", UserRecord(name="Bob", email="bob@example.com", age=25))
+
+        users = await repo.list_all()
+        assert {user.name for user in users} == {"Alice", "Bob"}
+
+        batch = await repo.load_batch(["alice", "missing"])
+        assert batch["alice"] is not None
+        assert batch["missing"] is None
+
 
 
 @pytest.mark.asyncio

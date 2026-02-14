@@ -32,6 +32,7 @@ class TypedKVRepository(Generic[T]):
         self,
         storage: AgentFS,
         prefix: str = "",
+        model_type: Optional[Type[T]] = None,
         key_builder: Optional[Callable[[str], str]] = None,
     ):
         """Initialize repository.
@@ -39,12 +40,24 @@ class TypedKVRepository(Generic[T]):
         Args:
             storage: AgentFS instance
             prefix: Key prefix for namespacing (e.g., "user:", "agent:")
+            model_type: Optional default Pydantic model class used by
+                `load`, `list_all`, and `load_batch` when not provided
             key_builder: Optional function to build keys from IDs
         """
         self.storage = storage
         self.prefix = prefix
+        self.model_type = model_type
         self.key_builder = key_builder or (lambda id: f"{prefix}{id}")
         self._manager = KVManager(storage)
+
+    def _resolve_model_type(self, model_type: Optional[Type[T]]) -> Type[T]:
+        resolved = model_type or self.model_type
+        if resolved is None:
+            raise ValueError(
+                "model_type is required. Provide it to the method call or set "
+                "a default when constructing TypedKVRepository."
+            )
+        return resolved
 
     async def save(self, id: str, record: T) -> None:
         """Save a record to KV store.
@@ -60,12 +73,13 @@ class TypedKVRepository(Generic[T]):
         # AgentFS KV store accepts dicts, not JSON strings
         await self._manager.set(key, record.model_dump())
 
-    async def load(self, id: str, model_type: Type[T]) -> Optional[T]:
+    async def load(self, id: str, model_type: Optional[Type[T]] = None) -> Optional[T]:
         """Load a record from KV store.
 
         Args:
             id: Record identifier
-            model_type: Pydantic model class
+            model_type: Optional Pydantic model class. If omitted, uses the
+                repository default `model_type` configured at construction.
 
         Returns:
             Model instance or None if not found
@@ -80,7 +94,7 @@ class TypedKVRepository(Generic[T]):
         if data is None:
             return None
         # AgentFS KV store returns dict, not JSON string
-        return model_type.model_validate(data)
+        return self._resolve_model_type(model_type).model_validate(data)
 
     async def delete(self, id: str) -> None:
         """Delete a record from KV store.
@@ -94,11 +108,12 @@ class TypedKVRepository(Generic[T]):
         key = self.key_builder(id)
         await self._manager.delete(key)
 
-    async def list_all(self, model_type: Type[T]) -> list[T]:
+    async def list_all(self, model_type: Optional[Type[T]] = None) -> list[T]:
         """List all records with the configured prefix.
 
         Args:
-            model_type: Pydantic model class
+            model_type: Optional Pydantic model class. If omitted, uses the
+                repository default `model_type` configured at construction.
 
         Returns:
             List of all matching records
@@ -111,12 +126,13 @@ class TypedKVRepository(Generic[T]):
         # AgentFS KV store list() returns list of dicts with 'key' and 'value'
         items = await self._manager.list(self.prefix)
         records: list[T] = []
+        resolved_model_type = self._resolve_model_type(model_type)
 
         for item in items:
             try:
                 # item is a dict with 'key' and 'value' fields
                 # value is already deserialized from JSON
-                records.append(model_type.model_validate(item["value"]))
+                records.append(resolved_model_type.model_validate(item["value"]))
             except Exception:
                 # Skip invalid records
                 continue
@@ -186,12 +202,17 @@ class TypedKVRepository(Generic[T]):
         for record_id in ids:
             await self.delete(record_id)
 
-    async def load_batch(self, ids: list[str], model_type: Type[T]) -> dict[str, Optional[T]]:
+    async def load_batch(
+        self,
+        ids: list[str],
+        model_type: Optional[Type[T]] = None,
+    ) -> dict[str, Optional[T]]:
         """Load multiple records in batch.
 
         Args:
             ids: List of record IDs to load
-            model_type: Pydantic model class
+            model_type: Optional Pydantic model class. If omitted, uses the
+                repository default `model_type` configured at construction.
 
         Returns:
             Dictionary mapping IDs to records (None if not found)
@@ -203,8 +224,9 @@ class TypedKVRepository(Generic[T]):
             ...         print(f"{id}: {record.name}")
         """
         results = {}
+        resolved_model_type = self._resolve_model_type(model_type)
         for record_id in ids:
-            results[record_id] = await self.load(record_id, model_type)
+            results[record_id] = await self.load(record_id, resolved_model_type)
         return results
 
 

@@ -327,24 +327,26 @@ Fsdantic 0.2.0 introduces powerful new abstractions based on common usage patter
 
 ### Repository Pattern
 
-Generic typed repositories for type-safe KV operations:
+Use `workspace.kv` for simple raw KV workflows, and `workspace.kv.repository(...)`
+for typed model workflows powered by `TypedKVRepository`:
 
 ```python
-from fsdantic import TypedKVRepository, KVRecord
-from pydantic import BaseModel
+from fsdantic import KVRecord
 
 class UserRecord(KVRecord):  # Auto-includes created_at, updated_at
     user_id: str
     name: str
     email: str
 
-# Create a typed repository
-repo = TypedKVRepository[UserRecord](agent_fs, prefix="user:")
+# Simple path: raw KV access
+await workspace.kv.set("theme", "dark")
+theme = await workspace.kv.get("theme")
 
-# Type-safe operations
-await repo.save("alice", UserRecord(user_id="alice", name="Alice", email="alice@example.com"))
-user = await repo.load("alice", UserRecord)  # Returns Optional[UserRecord]
-all_users = await repo.list_all(UserRecord)  # Returns list[UserRecord]
+# Typed path: repository engine with model validation
+users = workspace.kv.repository(prefix="user:", model_type=UserRecord)
+await users.save("alice", UserRecord(user_id="alice", name="Alice", email="alice@example.com"))
+user = await users.load("alice")  # Returns Optional[UserRecord]
+all_users = await users.list_all()  # Returns list[UserRecord]
 ```
 
 ### Content Search
