@@ -9,7 +9,9 @@ import fnmatch
 import json
 import os
 import platform
+import re
 import shutil
+import shlex
 import socket
 import subprocess
 from dataclasses import dataclass
@@ -33,6 +35,9 @@ class StageResult:
     stderr_path: Path
     started_at: str
     finished_at: str
+    attempt_count: int = 1
+    rerun_performed: bool = False
+    final_attempt_junit: Path | None = None
 
     @property
     def passed(self) -> bool:
@@ -68,12 +73,33 @@ class CoverageStat:
 
 
 @dataclass(frozen=True)
+<<<<<<< HEAD:scripts/phase8_quality_gate.py
 class BenchmarkComparison:
     scenario: str
     baseline_median_ms: float
     current_median_ms: float
     regression_percent: float
     passed: bool
+||||||| 0f58dc0:scripts/phase8_quality_gate.py
+=======
+class TestAttemptOutcome:
+    node_id: str
+    outcome: str
+    stage_name: str
+    attempt_index: int
+
+
+@dataclass(frozen=True)
+class FlakyRecord:
+    node_id: str
+    stage_name: str
+    run_outcomes: tuple[str, ...]
+    failure_frequency: float
+    environment_context: str
+    suspected_cause: str
+    remediation_issue: str
+    risk_level: str
+>>>>>>> main:scripts/phase8_quality_gate_1.py
 
 
 STAGES: list[Stage] = [
@@ -130,40 +156,160 @@ COVERAGE_THRESHOLDS: list[tuple[str, tuple[str, ...], float, float]] = [
     ("Whole project floor", ("src/fsdantic/*",), 92.0, 88.0),
 ]
 
+MAX_RERUN_ATTEMPTS = 2
+HARD_FAIL_FLAKY_STAGES = {"property_regression_suite", "full_gate"}
+RETRY_EXCLUDED_STAGES = {"lint_import_sanity"}
+
+
+def is_pytest_command(command: str) -> bool:
+    return bool(re.match(r"^\s*python\s+-m\s+pytest\b", command))
+
+
+def with_junit_xml(command: str, junit_path: Path) -> str:
+    if "--junitxml" in command:
+        return command
+    return f"{command} --junitxml {junit_path}"
+
+
+def build_targeted_rerun_command(command: str, node_ids: list[str]) -> str:
+    if not node_ids:
+        return command
+    quoted = " ".join(shlex.quote(node_id) for node_id in node_ids)
+    return f"{command} {quoted}"
+
+
+def parse_junit_outcomes(junit_path: Path, stage_name: str, attempt_index: int) -> list[TestAttemptOutcome]:
+    if not junit_path.exists():
+        return []
+
+    root = ET.parse(junit_path).getroot()
+    outcomes: list[TestAttemptOutcome] = []
+    for testcase in root.findall(".//testcase"):
+        node_id = testcase.attrib.get("classname", "")
+        if node_id:
+            node_id = f"{node_id}::{testcase.attrib.get('name', '').strip(':')}"
+        else:
+            node_id = testcase.attrib.get("name", "unknown")
+
+        if testcase.find("./failure") is not None:
+            outcome = "failed"
+        elif testcase.find("./error") is not None:
+            outcome = "error"
+        elif testcase.find("./skipped") is not None:
+            outcome = "skipped"
+        else:
+            outcome = "passed"
+
+        outcomes.append(
+            TestAttemptOutcome(
+                node_id=node_id,
+                outcome=outcome,
+                stage_name=stage_name,
+                attempt_index=attempt_index,
+            )
+        )
+
+    return outcomes
+
+
+def failed_node_ids(outcomes: list[TestAttemptOutcome]) -> list[str]:
+    return sorted({o.node_id for o in outcomes if o.outcome in {"failed", "error"}})
+
+
+def is_retry_eligible(stage: Stage, result: StageResult, outcomes: list[TestAttemptOutcome]) -> bool:
+    if stage.name in RETRY_EXCLUDED_STAGES:
+        return False
+    if not is_pytest_command(stage.command):
+        return False
+    if result.returncode == 0:
+        return False
+    return bool(failed_node_ids(outcomes))
+
 
 def slugify(value: str) -> str:
     return "".join(ch if ch.isalnum() else "_" for ch in value).strip("_").lower()
 
 
-def run_stage(stage: Stage, artifacts_dir: Path, env: dict[str, str]) -> StageResult:
+def run_stage(stage: Stage, artifacts_dir: Path, env: dict[str, str]) -> tuple[StageResult, list[list[TestAttemptOutcome]]]:
     stage_ts = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     slug = slugify(stage.name)
     stdout_path = artifacts_dir / f"{slug}.{stage_ts}.stdout.log"
     stderr_path = artifacts_dir / f"{slug}.{stage_ts}.stderr.log"
 
     started = dt.datetime.now(dt.timezone.utc)
-    proc = subprocess.run(
-        stage.command,
-        shell=True,
-        text=True,
-        env=env,
-        capture_output=True,
-        check=False,
-    )
+
+    base_command = stage.command
+    command = base_command
+    attempt = 0
+    attempt_outcomes: list[list[TestAttemptOutcome]] = []
+    final_proc: subprocess.CompletedProcess[str] | None = None
+    final_junit: Path | None = None
+
+    while True:
+        attempt += 1
+        junit_path: Path | None = None
+        attempt_command = command
+        if is_pytest_command(command):
+            junit_path = artifacts_dir / f"{slug}.{stage_ts}.attempt{attempt}.junit.xml"
+            attempt_command = with_junit_xml(command, junit_path)
+
+        proc = subprocess.run(
+            attempt_command,
+            shell=True,
+            text=True,
+            env=env,
+            capture_output=True,
+            check=False,
+        )
+        final_proc = proc
+        if junit_path:
+            final_junit = junit_path
+            attempt_outcomes.append(parse_junit_outcomes(junit_path, stage.name, attempt))
+        else:
+            attempt_outcomes.append([])
+
+        if attempt == 1:
+            stdout_path.write_text(proc.stdout, encoding="utf-8")
+            stderr_path.write_text(proc.stderr, encoding="utf-8")
+
+        current_failures = failed_node_ids(attempt_outcomes[-1])
+        eligible = is_retry_eligible(
+            stage,
+            StageResult(
+                stage=stage,
+                returncode=proc.returncode,
+                duration_seconds=0,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                started_at="",
+                finished_at="",
+            ),
+            attempt_outcomes[-1],
+        )
+        if not eligible or attempt > MAX_RERUN_ATTEMPTS:
+            if attempt > 1:
+                stdout_path.write_text(proc.stdout, encoding="utf-8")
+                stderr_path.write_text(proc.stderr, encoding="utf-8")
+            break
+
+        command = build_targeted_rerun_command(base_command, current_failures)
+
     finished = dt.datetime.now(dt.timezone.utc)
+    assert final_proc is not None
 
-    stdout_path.write_text(proc.stdout, encoding="utf-8")
-    stderr_path.write_text(proc.stderr, encoding="utf-8")
-
-    return StageResult(
+    result = StageResult(
         stage=stage,
-        returncode=proc.returncode,
+        returncode=final_proc.returncode,
         duration_seconds=(finished - started).total_seconds(),
         stdout_path=stdout_path,
         stderr_path=stderr_path,
         started_at=started.isoformat(),
         finished_at=finished.isoformat(),
+        attempt_count=attempt,
+        rerun_performed=attempt > 1,
+        final_attempt_junit=final_junit,
     )
+    return result, attempt_outcomes
 
 
 def git_commit_sha() -> str:
@@ -282,6 +428,7 @@ def print_coverage_threshold_table(rows: list[tuple[str, str, float, float, floa
         print(render(row))
 
 
+<<<<<<< HEAD:scripts/phase8_quality_gate.py
 def load_benchmark_medians(artifact_path: Path) -> dict[str, float]:
     payload = json.loads(artifact_path.read_text(encoding="utf-8"))
     scenarios = payload.get("scenarios", {})
@@ -334,6 +481,74 @@ def compare_benchmark_medians(
     regression_fail = any(not row.passed for row in comparisons)
     mismatch_fail = bool(missing_from_current or missing_from_baseline)
     return comparisons, missing_from_current, missing_from_baseline, regression_fail or mismatch_fail
+||||||| 0f58dc0:scripts/phase8_quality_gate.py
+=======
+def classify_flaky_records(
+    stage_results: list[StageResult],
+    outcomes_by_stage: dict[str, list[list[TestAttemptOutcome]]],
+    env_context: str,
+) -> list[FlakyRecord]:
+    records: list[FlakyRecord] = []
+
+    for result in stage_results:
+        attempts = outcomes_by_stage.get(result.stage.name, [])
+        if len(attempts) <= 1:
+            continue
+
+        per_node: dict[str, list[str]] = {}
+        for run in attempts:
+            for outcome in run:
+                if outcome.outcome not in {"passed", "failed", "error"}:
+                    continue
+                per_node.setdefault(outcome.node_id, []).append(outcome.outcome)
+
+        for node_id, run_outcomes in per_node.items():
+            unique = set(run_outcomes)
+            if len(unique) <= 1:
+                continue
+
+            failures = sum(1 for outcome in run_outcomes if outcome in {"failed", "error"})
+            frequency = failures / len(run_outcomes)
+            risk_level = "high" if result.stage.name in HARD_FAIL_FLAKY_STAGES else "non-critical"
+            suspected = "Intermittent timing or shared-state dependency"
+            remediation = "TODO-ISSUE"
+            records.append(
+                FlakyRecord(
+                    node_id=node_id,
+                    stage_name=result.stage.name,
+                    run_outcomes=tuple(run_outcomes),
+                    failure_frequency=frequency,
+                    environment_context=env_context,
+                    suspected_cause=suspected,
+                    remediation_issue=remediation,
+                    risk_level=risk_level,
+                )
+            )
+
+    return sorted(records, key=lambda r: (r.risk_level != "high", r.stage_name, r.node_id))
+
+
+def write_flaky_report(artifacts_dir: Path, flaky_records: list[FlakyRecord]) -> Path:
+    report_path = artifacts_dir / "phase8_flaky_report.json"
+    payload = {
+        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "flaky_tests": [
+            {
+                "node_id": r.node_id,
+                "stage_name": r.stage_name,
+                "run_outcomes": list(r.run_outcomes),
+                "failure_frequency": round(r.failure_frequency, 4),
+                "environment_context": r.environment_context,
+                "suspected_cause": r.suspected_cause,
+                "remediation_issue": r.remediation_issue,
+                "risk_level": r.risk_level,
+            }
+            for r in flaky_records
+        ],
+    }
+    report_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return report_path
+>>>>>>> main:scripts/phase8_quality_gate_1.py
 
 
 def build_report(
@@ -341,12 +556,18 @@ def build_report(
     stage_results: list[StageResult],
     coverage_xml: Path | None,
     coverage_html: Path | None,
+<<<<<<< HEAD:scripts/phase8_quality_gate.py
     benchmark_baseline_path: Path,
     benchmark_tolerance_percent: float,
     benchmark_comparisons: list[BenchmarkComparison],
     benchmark_missing_from_current: list[str],
     benchmark_missing_from_baseline: list[str],
     benchmark_gate_failed: bool,
+||||||| 0f58dc0:scripts/phase8_quality_gate.py
+=======
+    flaky_records: list[FlakyRecord],
+    flaky_report_path: Path,
+>>>>>>> main:scripts/phase8_quality_gate_1.py
 ) -> tuple[str, bool]:
     passed = [r for r in stage_results if r.passed]
     failed = [r for r in stage_results if not r.passed]
@@ -394,15 +615,37 @@ def build_report(
     high_risk_source = next((r for r in stage_results if r.stage.name == "property_regression_suite"), None)
     high_risk_status = "PASS" if (high_risk_source and high_risk_source.passed) else "FAIL"
 
+<<<<<<< HEAD:scripts/phase8_quality_gate.py
     release_fail = bool(failed) or coverage_fail or high_risk_status == "FAIL" or benchmark_gate_failed
+||||||| 0f58dc0:scripts/phase8_quality_gate.py
+    release_fail = bool(failed) or coverage_fail or high_risk_status == "FAIL"
+=======
+    unresolved_flaky = [r for r in flaky_records if r.remediation_issue == "TODO-ISSUE"]
+    high_risk_flaky = [r for r in unresolved_flaky if r.risk_level == "high"]
+    non_critical_unresolved = [r for r in unresolved_flaky if r.risk_level != "high"]
+
+    flaky_hard_fail = bool(high_risk_flaky)
+    flaky_conditional_fail = bool(non_critical_unresolved)
+
+    release_fail = bool(failed) or coverage_fail or high_risk_status == "FAIL" or flaky_hard_fail or flaky_conditional_fail
+>>>>>>> main:scripts/phase8_quality_gate_1.py
     final_status = "FAIL" if release_fail else "PASS"
+
+    flaky_rows = [
+        "| "
+        f"{r.node_id} | {r.stage_name} | {', '.join(r.run_outcomes)} | {r.failure_frequency:.2f} | "
+        f"{r.risk_level} | {r.remediation_issue} |"
+        for r in flaky_records
+    ]
+    if not flaky_rows:
+        flaky_rows.append("| none | n/a | n/a | 0.00 | n/a | n/a |")
 
     command_table = []
     for result in stage_results:
         command_table.append(
             "| "
             f"{result.stage.name} | `{result.stage.command}` | {'PASS' if result.passed else 'FAIL'} | "
-            f"{result.returncode} | {result.duration_seconds:.2f}s | "
+            f"{result.returncode} | {result.duration_seconds:.2f}s ({result.attempt_count} attempt(s)) | "
             f"[{result.stdout_path.name}]({result.stdout_path.name}) | "
             f"[{result.stderr_path.name}]({result.stderr_path.name}) |"
         )
@@ -439,7 +682,7 @@ def build_report(
 - Total test commands executed: {total}
 - Passed: {len(passed)}
 - Failed: {len(failed)}
-- Flaky: 0
+- Flaky: {len(flaky_records)}
 
 ## Command Outcomes
 | Stage | Command | Status | Exit Code | Duration | Stdout | Stderr |
@@ -456,6 +699,9 @@ def build_report(
 
 Coverage artifacts:
 {coverage_artifacts_text}
+
+Flaky artifact:
+- flaky report: [{flaky_report_path.name}]({flaky_report_path.name})
 
 ## Performance Summary
 - Benchmark baseline reference: `{benchmark_baseline_path}`
@@ -479,10 +725,19 @@ Coverage artifacts:
 - P2+: Not inventoried by this script.
 - Deferred with approval: Not inventoried by this script.
 
+## Flaky Classification (Step 8)
+- Hard-fail flaky tests (high-risk/release-critical, unresolved): {len(high_risk_flaky)}
+- Conditional-fail flaky tests (non-critical, unresolved): {len(non_critical_unresolved)}
+- Remediation tracking placeholders used: {'Yes' if unresolved_flaky else 'No'}
+
+| Test node id | Stage | Run outcomes | Failure frequency | Risk | Remediation issue |
+| --- | --- | --- | ---: | --- | --- |
+{os.linesep.join(flaky_rows)}
+
 ## Final Gate Decision
 - Status: {final_status}
 - Release recommendation: {'Do not release until blocking failures are resolved.' if release_fail else 'Release-ready based on automated gates.'}
-- Required follow-ups: {'Fix failed stages and/or threshold breaches, then rerun.' if release_fail else 'None from automated checks.'}
+- Required follow-ups: {'Resolve failed stages, threshold breaches, and unresolved flaky remediations, then rerun.' if release_fail else 'None from automated checks.'}
 """
 
     return report, release_fail
@@ -521,17 +776,24 @@ def main() -> int:
     env["FSDANTIC_BENCHMARK_OUTPUT"] = str(benchmark_current_path)
 
     stage_results: list[StageResult] = []
+    outcomes_by_stage: dict[str, list[list[TestAttemptOutcome]]] = {}
     print(f"[phase8] Artifacts: {artifacts_dir}")
     for stage in STAGES:
         print(f"[phase8] Running {stage.name}: {stage.command}")
-        result = run_stage(stage, artifacts_dir, env)
+        result, attempt_outcomes = run_stage(stage, artifacts_dir, env)
         stage_results.append(result)
+        outcomes_by_stage[stage.name] = attempt_outcomes
         print(
             f"[phase8] {stage.name} -> {'PASS' if result.passed else 'FAIL'} "
-            f"(exit={result.returncode}, duration={result.duration_seconds:.2f}s)"
+            f"(exit={result.returncode}, duration={result.duration_seconds:.2f}s, attempts={result.attempt_count})"
         )
 
+    runner = f"{platform.platform()} | python {platform.python_version()} | host {socket.gethostname()}"
+    flaky_records = classify_flaky_records(stage_results, outcomes_by_stage, runner)
+    flaky_report_path = write_flaky_report(artifacts_dir, flaky_records)
+
     coverage_xml, coverage_html = copy_coverage_artifacts(repo_root, artifacts_dir)
+<<<<<<< HEAD:scripts/phase8_quality_gate.py
 
     benchmark_comparisons: list[BenchmarkComparison] = []
     benchmark_missing_from_current: list[str] = []
@@ -571,6 +833,17 @@ def main() -> int:
         benchmark_missing_from_current,
         benchmark_missing_from_baseline,
         benchmark_gate_failed,
+||||||| 0f58dc0:scripts/phase8_quality_gate.py
+    report, release_fail = build_report(artifacts_dir, stage_results, coverage_xml, coverage_html)
+=======
+    report, release_fail = build_report(
+        artifacts_dir,
+        stage_results,
+        coverage_xml,
+        coverage_html,
+        flaky_records,
+        flaky_report_path,
+>>>>>>> main:scripts/phase8_quality_gate_1.py
     )
 
     report_path = artifacts_dir / "phase8_quality_gate_report.md"
