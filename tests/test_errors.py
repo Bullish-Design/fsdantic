@@ -45,6 +45,20 @@ def test_per_errno_mappings(code, expected_type):
     assert str(translated).startswith("op:")
 
 
+def test_per_errno_mapping_covers_every_required_code_once():
+    """Every required errno key must be explicitly covered by the test matrix."""
+    covered_codes = {
+        "ENOENT",
+        "EEXIST",
+        "ENOTDIR",
+        "EISDIR",
+        "ENOTEMPTY",
+        "EPERM",
+        "EINVAL",
+    }
+    assert covered_codes == set(ERRNO_EXCEPTION_MAP)
+
+
 def test_mapping_matrix_coverage_is_strict():
     """Fail loudly if a required errno mapping is removed/misrouted."""
     expected = {
@@ -80,6 +94,9 @@ def test_translation_matrix_with_unknown_fallback(code, expected_type):
     translated = translate_agentfs_error(error)
 
     assert isinstance(translated, expected_type)
+    if expected_type is FileSystemError:
+        assert translated.path == "/data.txt"
+        assert translated.cause is error
 
 
 def test_decorator_chains_cause():
@@ -95,6 +112,17 @@ def test_decorator_chains_cause():
     assert exc_info.value.__cause__.code == "ENOENT"
 
 
+def test_translated_exception_can_be_chained_via_raise_from():
+    original = ErrnoException("EEXIST", "open", path="/existing", message="already exists")
+
+    with pytest.raises(FileExistsError) as exc_info:
+        raise translate_agentfs_error(original, context="write") from original
+
+    assert exc_info.value.path == "/existing"
+    assert exc_info.value.cause is original
+    assert exc_info.value.__cause__ is original
+
+
 def test_decorator_non_errno_passthrough():
     @handle_agentfs_errors
     async def raises_runtime_error():
@@ -102,6 +130,20 @@ def test_decorator_non_errno_passthrough():
 
     with pytest.raises(RuntimeError, match="passthrough"):
         asyncio.run(raises_runtime_error())
+
+
+def test_decorator_non_errno_passthrough_preserves_cause_chain():
+    @handle_agentfs_errors
+    async def raises_wrapped_non_errno():
+        try:
+            raise ValueError("low-level")
+        except ValueError as error:
+            raise RuntimeError("top-level") from error
+
+    with pytest.raises(RuntimeError, match="top-level") as exc_info:
+        asyncio.run(raises_wrapped_non_errno())
+
+    assert isinstance(exc_info.value.__cause__, ValueError)
 
 
 def test_key_structured_field():

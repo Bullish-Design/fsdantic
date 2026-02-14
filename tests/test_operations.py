@@ -199,8 +199,11 @@ class TestFileOperationsFallthrough:
         """Should raise FileNotFoundError if file in neither layer."""
         ops = FileOperations(agent_fs, base_fs=stable_fs)
 
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(FileNotFoundError) as exc_info:
             await ops.read_file("/nonexistent.txt")
+
+        assert exc_info.value.path == "/nonexistent.txt"
+        assert exc_info.value.cause is not None
 
     async def test_write_only_to_overlay(self, agent_fs, stable_fs):
         """Write should only affect overlay, not base."""
@@ -214,8 +217,10 @@ class TestFileOperationsFallthrough:
 
         # Should not exist in base
         stable_ops = FileOperations(stable_fs)
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(FileNotFoundError) as exc_info:
             await stable_ops.read_file("/new-file.txt")
+
+        assert exc_info.value.path == "/new-file.txt"
 
     async def test_file_exists_checks_both_layers(self, agent_fs, stable_fs):
         """file_exists should check both layers."""
