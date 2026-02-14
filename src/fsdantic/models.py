@@ -34,7 +34,7 @@ class AgentFSOptions(BaseModel):
         if v is None:
             return None
         if not isinstance(v, str):
-            raise TypeError("Selector values must be strings")
+            raise ValueError("Selector values must be strings")
         if v is not None and not v.strip():
             raise ValueError("Selector values cannot be empty")
         return v
