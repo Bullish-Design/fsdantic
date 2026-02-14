@@ -35,6 +35,35 @@ class TestKVRecord:
         assert record.created_at == explicit_time
         assert record.updated_at == explicit_time
 
+    def test_kvrecord_created_at_seeds_updated_at(self):
+        """When updated_at is omitted, it should default to created_at."""
+
+        class TestRecord(KVRecord):
+            name: str
+
+        created_time = 1234567890.0
+        record = TestRecord(name="test", created_at=created_time)
+
+        assert record.created_at == created_time
+        assert record.updated_at == created_time
+
+    def test_kvrecord_preserves_explicit_distinct_timestamps(self):
+        """Explicit created_at and updated_at inputs should both be preserved."""
+
+        class TestRecord(KVRecord):
+            name: str
+
+        created_time = 1000.0
+        updated_time = 2000.0
+        record = TestRecord(
+            name="test",
+            created_at=created_time,
+            updated_at=updated_time,
+        )
+
+        assert record.created_at == created_time
+        assert record.updated_at == updated_time
+
     def test_kvrecord_mark_updated(self):
         """mark_updated() should update the updated_at timestamp."""
 

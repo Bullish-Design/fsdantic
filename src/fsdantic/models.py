@@ -228,9 +228,28 @@ class KVRecord(BaseModel):
         description="Creation timestamp (Unix epoch)"
     )
     updated_at: float = Field(
-        default_factory=time.time,
         description="Last update timestamp (Unix epoch)"
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def sync_initial_timestamps(cls, data: Any) -> Any:
+        """Initialize updated_at from created_at when not explicitly provided."""
+        if not isinstance(data, dict):
+            return data
+
+        if "updated_at" in data:
+            return data
+
+        normalized = dict(data)
+        if "created_at" in normalized:
+            normalized["updated_at"] = normalized["created_at"]
+        else:
+            now = time.time()
+            normalized["created_at"] = now
+            normalized["updated_at"] = now
+
+        return normalized
 
     def mark_updated(self) -> None:
         """Update the updated_at timestamp to current time."""
