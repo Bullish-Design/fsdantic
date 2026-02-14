@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "unit": "ms",
+  "scenarios": {
+    "file_read_average_latency": {
+      "median_ms": 2.5
+    },
+    "file_write_average_latency": {
+      "median_ms": 3.0
+    },
+    "view_count_latency": {
+      "median_ms": 110.0
+    },
+    "view_query_without_content_latency": {
+      "median_ms": 95.0
+    }
+  }
+}

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import fnmatch
+import json
 import os
 import platform
 import shutil
@@ -66,6 +67,15 @@ class CoverageStat:
         )
 
 
+@dataclass(frozen=True)
+class BenchmarkComparison:
+    scenario: str
+    baseline_median_ms: float
+    current_median_ms: float
+    regression_percent: float
+    passed: bool
+
+
 STAGES: list[Stage] = [
     Stage(
         name="lint_import_sanity",
@@ -101,7 +111,7 @@ STAGES: list[Stage] = [
     Stage(
         name="performance_suite",
         purpose="Detect regressions vs baseline",
-        command='python -m pytest tests/test_performance.py -m "benchmark or slow" -q',
+        command='python -m pytest tests/test_performance.py -m "benchmark" -q',
     ),
     Stage(
         name="full_gate",
@@ -272,11 +282,71 @@ def print_coverage_threshold_table(rows: list[tuple[str, str, float, float, floa
         print(render(row))
 
 
+def load_benchmark_medians(artifact_path: Path) -> dict[str, float]:
+    payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    scenarios = payload.get("scenarios", {})
+    if not isinstance(scenarios, dict):
+        raise ValueError(f"Invalid benchmark artifact at {artifact_path}: scenarios must be an object")
+
+    medians: dict[str, float] = {}
+    for scenario, values in scenarios.items():
+        if not isinstance(values, dict):
+            raise ValueError(
+                f"Invalid benchmark artifact at {artifact_path}: scenario '{scenario}' must be an object"
+            )
+        median_ms = values.get("median_ms")
+        if not isinstance(median_ms, int | float):
+            raise ValueError(
+                f"Invalid benchmark artifact at {artifact_path}: scenario '{scenario}' missing numeric median_ms"
+            )
+        medians[scenario] = float(median_ms)
+    return medians
+
+
+def compare_benchmark_medians(
+    baseline_medians: dict[str, float],
+    current_medians: dict[str, float],
+    tolerance_percent: float,
+) -> tuple[list[BenchmarkComparison], list[str], list[str], bool]:
+    comparisons: list[BenchmarkComparison] = []
+
+    missing_from_current = sorted(set(baseline_medians) - set(current_medians))
+    missing_from_baseline = sorted(set(current_medians) - set(baseline_medians))
+
+    for scenario in sorted(set(baseline_medians) & set(current_medians)):
+        baseline = baseline_medians[scenario]
+        current = current_medians[scenario]
+        if baseline == 0:
+            regression = 0.0 if current == 0 else float("inf")
+        else:
+            regression = ((current - baseline) / baseline) * 100
+        passed = regression <= tolerance_percent
+        comparisons.append(
+            BenchmarkComparison(
+                scenario=scenario,
+                baseline_median_ms=baseline,
+                current_median_ms=current,
+                regression_percent=regression,
+                passed=passed,
+            )
+        )
+
+    regression_fail = any(not row.passed for row in comparisons)
+    mismatch_fail = bool(missing_from_current or missing_from_baseline)
+    return comparisons, missing_from_current, missing_from_baseline, regression_fail or mismatch_fail
+
+
 def build_report(
     artifacts_dir: Path,
     stage_results: list[StageResult],
     coverage_xml: Path | None,
     coverage_html: Path | None,
+    benchmark_baseline_path: Path,
+    benchmark_tolerance_percent: float,
+    benchmark_comparisons: list[BenchmarkComparison],
+    benchmark_missing_from_current: list[str],
+    benchmark_missing_from_baseline: list[str],
+    benchmark_gate_failed: bool,
 ) -> tuple[str, bool]:
     passed = [r for r in stage_results if r.passed]
     failed = [r for r in stage_results if not r.passed]
@@ -324,7 +394,7 @@ def build_report(
     high_risk_source = next((r for r in stage_results if r.stage.name == "property_regression_suite"), None)
     high_risk_status = "PASS" if (high_risk_source and high_risk_source.passed) else "FAIL"
 
-    release_fail = bool(failed) or coverage_fail or high_risk_status == "FAIL"
+    release_fail = bool(failed) or coverage_fail or high_risk_status == "FAIL" or benchmark_gate_failed
     final_status = "FAIL" if release_fail else "PASS"
 
     command_table = []
@@ -346,6 +416,17 @@ def build_report(
             coverage_links.append(f"- htmlcov: [htmlcov/index.html](htmlcov/index.html)")
 
     coverage_artifacts_text = "\n".join(coverage_links) if coverage_links else "- none"
+
+    performance_rows = []
+    for row in benchmark_comparisons:
+        regression = f"{row.regression_percent:.2f}%" if row.regression_percent != float("inf") else "inf%"
+        performance_rows.append(
+            "| "
+            f"{row.scenario} | {row.baseline_median_ms:.4f} | {row.current_median_ms:.4f} | "
+            f"{regression} | {'PASS' if row.passed else 'FAIL'} |"
+        )
+    if not performance_rows:
+        performance_rows.append("| No benchmark medians compared | n/a | n/a | n/a | FAIL |")
 
     report = f"""# Phase 8 Quality Gate Report
 
@@ -377,10 +458,15 @@ Coverage artifacts:
 {coverage_artifacts_text}
 
 ## Performance Summary
-- Benchmark baseline reference: Not provided by this runner.
-- Current median/p95 by scenario: See performance suite logs.
-- Regression delta (%): Not computed by this script (requires baseline data source).
-- Threshold breaches: {'Yes' if any(r.stage.name == 'performance_suite' and not r.passed for r in stage_results) else 'No'}
+- Benchmark baseline reference: `{benchmark_baseline_path}`
+- Regression tolerance: {benchmark_tolerance_percent:.2f}%
+- Scenario comparisons:
+| Scenario | Baseline median (ms) | Current median (ms) | Regression (%) | Status |
+| --- | ---: | ---: | ---: | --- |
+{os.linesep.join(performance_rows)}
+- Missing from current run: {', '.join(benchmark_missing_from_current) if benchmark_missing_from_current else 'none'}
+- Missing from baseline: {', '.join(benchmark_missing_from_baseline) if benchmark_missing_from_baseline else 'none'}
+- Threshold breaches: {'Yes' if benchmark_gate_failed else 'No'}
 
 ## High-Risk Regression Results
 - Error translation: {high_risk_status}
@@ -410,6 +496,18 @@ def main() -> int:
         default=Path("artifacts/phase8"),
         help="Base artifact directory (default: artifacts/phase8)",
     )
+    parser.add_argument(
+        "--benchmark-baseline",
+        type=Path,
+        default=Path("tests/performance_baseline.json"),
+        help="Baseline benchmark medians JSON (default: tests/performance_baseline.json)",
+    )
+    parser.add_argument(
+        "--benchmark-tolerance-percent",
+        type=float,
+        default=10.0,
+        help="Allowed performance regression percent before failing (default: 10)",
+    )
     args = parser.parse_args()
 
     repo_root = Path.cwd()
@@ -419,6 +517,8 @@ def main() -> int:
 
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
+    benchmark_current_path = artifacts_dir / "performance_current.json"
+    env["FSDANTIC_BENCHMARK_OUTPUT"] = str(benchmark_current_path)
 
     stage_results: list[StageResult] = []
     print(f"[phase8] Artifacts: {artifacts_dir}")
@@ -432,7 +532,46 @@ def main() -> int:
         )
 
     coverage_xml, coverage_html = copy_coverage_artifacts(repo_root, artifacts_dir)
-    report, release_fail = build_report(artifacts_dir, stage_results, coverage_xml, coverage_html)
+
+    benchmark_comparisons: list[BenchmarkComparison] = []
+    benchmark_missing_from_current: list[str] = []
+    benchmark_missing_from_baseline: list[str] = []
+    benchmark_gate_failed = False
+
+    try:
+        if not args.benchmark_baseline.exists():
+            raise FileNotFoundError(f"Benchmark baseline not found: {args.benchmark_baseline}")
+        if not benchmark_current_path.exists():
+            raise FileNotFoundError(f"Benchmark current metrics not found: {benchmark_current_path}")
+
+        baseline_medians = load_benchmark_medians(args.benchmark_baseline)
+        current_medians = load_benchmark_medians(benchmark_current_path)
+        (
+            benchmark_comparisons,
+            benchmark_missing_from_current,
+            benchmark_missing_from_baseline,
+            benchmark_gate_failed,
+        ) = compare_benchmark_medians(
+            baseline_medians,
+            current_medians,
+            args.benchmark_tolerance_percent,
+        )
+    except (OSError, ValueError) as exc:
+        print(f"[phase8] Performance baseline comparison failed: {exc}")
+        benchmark_gate_failed = True
+
+    report, release_fail = build_report(
+        artifacts_dir,
+        stage_results,
+        coverage_xml,
+        coverage_html,
+        args.benchmark_baseline,
+        args.benchmark_tolerance_percent,
+        benchmark_comparisons,
+        benchmark_missing_from_current,
+        benchmark_missing_from_baseline,
+        benchmark_gate_failed,
+    )
 
     report_path = artifacts_dir / "phase8_quality_gate_report.md"
     report_path.write_text(report, encoding="utf-8")
