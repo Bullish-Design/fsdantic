@@ -24,7 +24,7 @@ class TestFileManager:
         binary_content = b"\x00\x01\x02\x03"
         await ops.write("/binary.dat", binary_content)
 
-        content = await ops.read("/binary.dat", encoding=None)
+        content = await ops.read("/binary.dat", mode="binary")
         assert content == binary_content
 
     async def test_read_with_encoding(self, agent_fs):
@@ -405,10 +405,66 @@ class TestFileManagerEdgeCases:
 
         # Read both
         text = await ops.read("/text.txt")
-        binary = await ops.read("/binary.dat", encoding=None)
+        binary = await ops.read("/binary.dat", mode="binary")
 
         assert text == "text content"
         assert binary == b"\x00\x01\x02"
+
+    async def test_json_dict_roundtrip(self, agent_fs):
+        """Should serialize dict content as JSON with deterministic formatting."""
+        ops = FileManager(agent_fs)
+
+        payload = {"message": "こんにちは", "count": 2}
+        await ops.write("/payload.json", payload)
+
+        content = await ops.read("/payload.json")
+        assert content == '{\n  "message": "こんにちは",\n  "count": 2\n}'
+
+    async def test_json_list_roundtrip(self, agent_fs):
+        """Should serialize list content as JSON with deterministic formatting."""
+        ops = FileManager(agent_fs)
+
+        payload = ["α", "β", 3]
+        await ops.write("/items.json", payload)
+
+        content = await ops.read("/items.json")
+        assert content == '[\n  "α",\n  "β",\n  3\n]'
+
+    async def test_mode_type_mismatch_validation(self, agent_fs):
+        """Should raise predictable errors when mode and content type do not match."""
+        ops = FileManager(agent_fs)
+
+        with pytest.raises(TypeError, match="mode='binary' requires bytes content"):
+            await ops.write("/bad.bin", "not-bytes", mode="binary")
+
+        with pytest.raises(TypeError, match="mode='text' requires str content"):
+            await ops.write("/bad.txt", b"not-text", mode="text")
+
+        with pytest.raises(TypeError, match="mode='json' requires dict or list content"):
+            await ops.write("/bad.json", "not-json", mode="json")
+
+    async def test_invalid_encoding_validation(self, agent_fs):
+        """Should validate text encodings on read/write APIs."""
+        ops = FileManager(agent_fs)
+
+        with pytest.raises(ValueError, match="Unknown encoding"):
+            await ops.write("/bad-encoding.txt", "hello", encoding="definitely-not-an-encoding")
+
+        await ops.write("/hello.txt", "hello")
+        with pytest.raises(ValueError, match="Unknown encoding"):
+            await ops.read("/hello.txt", encoding="definitely-not-an-encoding")
+
+    async def test_read_mode_encoding_mismatch_validation(self, agent_fs):
+        """Should reject incompatible read mode and encoding combinations."""
+        ops = FileManager(agent_fs)
+
+        await ops.write("/hello.txt", "hello")
+
+        with pytest.raises(ValueError, match="encoding must be None when mode='binary'"):
+            await ops.read("/hello.txt", mode="binary", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="encoding must be provided when mode='text'"):
+            await ops.read("/hello.txt", mode="text", encoding=None)
 
 
 @pytest.mark.asyncio

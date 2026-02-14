@@ -422,11 +422,16 @@ from fsdantic import FileManager
 
 ops = FileManager(agent_fs, base_fs=stable_fs)
 
-# Read with fallthrough (tries overlay, then base)
-content = await ops.read("config.json")
+# Read with explicit mode semantics (tries overlay, then base)
+content = await ops.read("config.json", mode="text")
+raw = await ops.read("image.png", mode="binary")
 
-# Write to overlay only
-await ops.write("output.txt", "Hello World")
+# Write to overlay only (overwrites existing files)
+await ops.write("output.txt", "Hello World", mode="text")
+await ops.write("meta.json", {"theme": "dark"}, mode="json")
+
+# Parent directories are created automatically by AgentFS
+await ops.write("logs/2026/02/run.txt", "ok")
 
 # Search files
 python_files = await ops.search("**/*.py")
@@ -438,6 +443,10 @@ print(stats.size, stats.is_file, stats.is_directory)
 # Get directory tree
 tree = await ops.tree("/src")
 ```
+
+`FileManager` validates mode/type combinations and raises predictable exceptions:
+- `ValueError` for invalid/unknown encodings or incompatible `mode`/`encoding` pairs.
+- `TypeError` when `content` type does not match the selected write mode.
 
 ### Query Builder Enhancements
 
