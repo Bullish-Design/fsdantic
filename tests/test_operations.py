@@ -1,7 +1,13 @@
 """Tests for FileManager helper class."""
 
 import pytest
-from fsdantic import FileManager, FileNotFoundError, FileStats, IsADirectoryError
+from fsdantic import (
+    DirectoryNotEmptyError,
+    FileManager,
+    FileNotFoundError,
+    FileStats,
+    NotADirectoryError,
+)
 
 
 @pytest.mark.asyncio
@@ -50,20 +56,24 @@ class TestFileManager:
         assert await ops.exists("/test.txt") is True
 
     async def test_list_dir(self, agent_fs):
-        """Should list directory contents."""
+        """Should list directory contents with deterministic ordering."""
         ops = FileManager(agent_fs)
 
-        # Create some files
-        await ops.write("/dir/file1.txt", "content1")
-        await ops.write("/dir/file2.txt", "content2")
-        await ops.write("/dir/file3.txt", "content3")
+        await ops.write("/dir/file-b.txt", "content1")
+        await ops.write("/dir/file-a.txt", "content2")
+        await ops.write("/dir/file-c.txt", "content3")
 
-        entries = await ops.list_dir("/dir")
-
-        assert len(entries) == 3
-        assert "file1.txt" in entries
-        assert "file2.txt" in entries
-        assert "file3.txt" in entries
+        assert await ops.list_dir("/dir") == ["file-a.txt", "file-b.txt", "file-c.txt"]
+        assert await ops.list_dir("/dir", output="relative") == [
+            "file-a.txt",
+            "file-b.txt",
+            "file-c.txt",
+        ]
+        assert await ops.list_dir("/dir", output="full") == [
+            "/dir/file-a.txt",
+            "/dir/file-b.txt",
+            "/dir/file-c.txt",
+        ]
 
     async def test_search_files_with_pattern(self, agent_fs):
         """Should search files by glob pattern."""
@@ -120,29 +130,28 @@ class TestFileManager:
         await ops.remove("/to-delete.txt")
         assert not await ops.exists("/to-delete.txt")
 
-    async def test_remove_directory_raises_for_file_only_semantics(self, agent_fs):
-        """Should reject directory paths for remove()."""
+    async def test_remove_directory_non_recursive_fails_when_not_empty(self, agent_fs):
+        """Should fail predictably for non-empty directories when recursive=False."""
         ops = FileManager(agent_fs)
 
         await ops.write("/dir/file.txt", "content")
 
-        with pytest.raises(IsADirectoryError):
-            await ops.remove("/dir")
+        with pytest.raises(DirectoryNotEmptyError):
+            await ops.remove("/dir", recursive=False)
 
-    async def test_remove_directory_with_rm_recursive(self, agent_fs):
-        """Should remove directories using AgentFS rm recursive semantics."""
+    async def test_remove_directory_recursive(self, agent_fs):
+        """Should remove directories recursively when requested."""
         ops = FileManager(agent_fs)
 
         await ops.write("/dir/sub/file.txt", "content")
-        await agent_fs.fs.rm("/dir", recursive=True)
+        await ops.remove("/dir", recursive=True)
 
         assert await ops.exists("/dir/sub/file.txt") is False
 
     async def test_tree_structure(self, agent_fs):
-        """Should generate directory tree."""
+        """Should generate directory tree with stable schema and ordering."""
         ops = FileManager(agent_fs)
 
-        # Create nested structure
         await ops.write("/file1.txt", "content")
         await ops.write("/dir1/file2.txt", "content")
         await ops.write("/dir1/file3.txt", "content")
@@ -150,13 +159,13 @@ class TestFileManager:
 
         tree = await ops.tree("/")
 
-        assert "file1.txt" in tree
-        assert "dir1" in tree
-        assert isinstance(tree["dir1"], dict)
-        assert "file2.txt" in tree["dir1"]
-        assert "file3.txt" in tree["dir1"]
-        assert "subdir" in tree["dir1"]
+        assert tree["type"] == "directory"
+        assert tree["path"] == "/"
+        assert [child["name"] for child in tree["children"]] == ["dir1", "file1.txt"]
 
+        dir1 = tree["children"][0]
+        assert dir1["type"] == "directory"
+        assert [child["name"] for child in dir1["children"]] == ["subdir", "file2.txt", "file3.txt"]
 
     async def test_methods_normalize_paths(self, agent_fs):
         """Path-accepting methods should normalize input paths."""
@@ -200,10 +209,9 @@ class TestFileManager:
 
         await ops.write("/level1/level2/level3/file.txt", "content")
 
-        # Depth 1 should only show level1
         tree = await ops.tree("/", max_depth=1)
-        assert "level1" in tree
-        assert tree["level1"] == {}  # Empty because we stopped at depth 1
+        assert tree["children"][0]["name"] == "level1"
+        assert tree["children"][0]["children"] == []
 
 
 @pytest.mark.asyncio
@@ -371,7 +379,7 @@ class TestFileManagerEdgeCases:
         ops = FileManager(agent_fs)
 
         tree = await ops.tree("/")
-        assert tree == {} or tree is not None
+        assert tree == {"name": "/", "path": "/", "type": "directory", "children": []}
 
     async def test_search_files_no_matches(self, agent_fs):
         """Should return empty list when no matches."""
@@ -467,6 +475,45 @@ class TestFileManagerEdgeCases:
             await ops.read("/hello.txt", mode="text", encoding=None)
 
 
+    async def test_list_dir_on_file_raises_not_a_directory(self, agent_fs):
+        """Should raise NotADirectoryError when listing a file path."""
+        ops = FileManager(agent_fs)
+
+        await ops.write("/plain.txt", "content")
+
+        with pytest.raises(NotADirectoryError):
+            await ops.list_dir("/plain.txt")
+
+    async def test_read_on_directory_raises_not_found(self, agent_fs):
+        """Reading a directory should raise file-not-found from AgentFS semantics."""
+        ops = FileManager(agent_fs)
+
+        await ops.write("/folder/file.txt", "content")
+
+        with pytest.raises(FileNotFoundError):
+            await ops.read("/folder")
+
+    async def test_remove_missing_path_raises_file_not_found(self, agent_fs):
+        """Removing a missing path should raise FileNotFoundError."""
+        ops = FileManager(agent_fs)
+
+        with pytest.raises(FileNotFoundError):
+            await ops.remove("/does-not-exist.txt")
+
+    async def test_stat_consistent_model_for_overlay_and_base(self, agent_fs, stable_fs):
+        """stat() should return the same FileStats model from overlay and base fallthrough."""
+        await stable_fs.fs.write_file("/base.txt", "base")
+        await agent_fs.fs.write_file("/overlay.txt", "overlay")
+
+        ops = FileManager(agent_fs, base_fs=stable_fs)
+        overlay_stats = await ops.stat("/overlay.txt")
+        base_stats = await ops.stat("/base.txt")
+
+        assert isinstance(overlay_stats, FileStats)
+        assert isinstance(base_stats, FileStats)
+        assert overlay_stats.model_fields.keys() == base_stats.model_fields.keys()
+
+
 @pytest.mark.asyncio
 class TestFileManagerIntegration:
     """Integration tests for FileManager workflows."""
@@ -494,9 +541,12 @@ class TestFileManagerIntegration:
 
         # 5. Get tree
         tree = await ops.tree("/project")
-        assert "main.py" in tree
-        assert "utils.py" in tree
-        assert "README.md" in tree
+        assert tree["type"] == "directory"
+        assert [child["name"] for child in tree["children"]] == [
+            "README.md",
+            "main.py",
+            "utils.py",
+        ]
 
         # 6. Remove a file
         await ops.remove("/project/utils.py")
