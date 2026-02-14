@@ -11,7 +11,7 @@ from datetime import datetime
 import pytest
 from agentfs_sdk import AgentFS, AgentFSOptions as SDKAgentFSOptions
 
-from agentfs_pydantic import AgentFSOptions, FileEntry, FileStats, View, ViewQuery
+from fsdantic import AgentFSOptions, FileEntry, FileStats, View, ViewQuery
 
 
 @pytest.mark.asyncio
@@ -202,9 +202,7 @@ class TestViewQueryIntegration:
                 # Query Python files
                 view = View(
                     agent=agent,
-                    query=ViewQuery(
-                        path_pattern="*.py", recursive=True, include_content=True
-                    ),
+                    query=ViewQuery(path_pattern="*.py", recursive=True, include_content=True),
                 )
 
                 files = await view.load()
@@ -237,9 +235,7 @@ class TestViewQueryIntegration:
                 # Query files between 10 and 100 bytes
                 view = View(
                     agent=agent,
-                    query=ViewQuery(
-                        path_pattern="*", recursive=True, min_size=10, max_size=100
-                    ),
+                    query=ViewQuery(path_pattern="*", recursive=True, min_size=10, max_size=100),
                 )
 
                 files = await view.load()
@@ -268,9 +264,7 @@ class TestViewQueryIntegration:
                 # Query only files in /src directory
                 view = View(
                     agent=agent,
-                    query=ViewQuery(
-                        path_pattern="*", recursive=True, regex_pattern=r"^/src/"
-                    ),
+                    query=ViewQuery(path_pattern="*", recursive=True, regex_pattern=r"^/src/"),
                 )
 
                 files = await view.load()
@@ -316,9 +310,7 @@ class TestViewQueryIntegration:
                 await agent.fs.write_file("/README.md", b"# README")
 
                 # Use fluent API
-                files = await (
-                    View(agent=agent).with_pattern("*.json").with_content(True).load()
-                )
+                files = await View(agent=agent).with_pattern("*.json").with_content(True).load()
 
                 assert len(files) == 2
                 assert all(f.path.endswith(".json") for f in files)
@@ -342,9 +334,7 @@ class TestViewQueryIntegration:
                 view = View(agent=agent, query=ViewQuery(path_pattern="*"))
 
                 # Filter for files > 1000 bytes
-                large_files = await view.filter(
-                    lambda f: f.stats and f.stats.size > 1000
-                )
+                large_files = await view.filter(lambda f: f.stats and f.stats.size > 1000)
 
                 assert len(large_files) == 1
                 assert large_files[0].path == "/file2.txt"
@@ -368,9 +358,7 @@ class TestPydanticModelsIntegration:
         # Should work with SDK
         with tempfile.TemporaryDirectory() as tmpdir:
             # Use explicit path to avoid creating .agentfs directory
-            sdk_options = SDKAgentFSOptions(
-                id=options_dict.get("id"), path=os.path.join(tmpdir, "test.db")
-            )
+            sdk_options = SDKAgentFSOptions(id=options_dict.get("id"), path=os.path.join(tmpdir, "test.db"))
             agent = await AgentFS.open(sdk_options)
 
             try:

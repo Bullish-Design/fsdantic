@@ -10,7 +10,7 @@ import time
 import pytest
 from agentfs_sdk import AgentFS, AgentFSOptions as SDKAgentFSOptions
 
-from agentfs_pydantic import View, ViewQuery
+from fsdantic import View, ViewQuery
 
 
 @pytest.mark.benchmark
@@ -42,9 +42,7 @@ class TestFileOperationsPerformance:
                 avg_ms = (duration / iterations) * 1000
 
                 print(f"\nAverage write time: {avg_ms:.2f}ms")
-                assert (
-                    avg_ms < 10
-                ), f"Average write time {avg_ms:.2f}ms exceeds 10ms target"
+                assert avg_ms < 10, f"Average write time {avg_ms:.2f}ms exceeds 10ms target"
 
             finally:
                 await agent._db.close()
@@ -74,9 +72,7 @@ class TestFileOperationsPerformance:
                 avg_ms = (duration / iterations) * 1000
 
                 print(f"\nAverage read time: {avg_ms:.2f}ms")
-                assert (
-                    avg_ms < 10
-                ), f"Average read time {avg_ms:.2f}ms exceeds 10ms target"
+                assert avg_ms < 10, f"Average read time {avg_ms:.2f}ms exceeds 10ms target"
 
             finally:
                 await agent._db.close()
@@ -106,9 +102,7 @@ class TestFileOperationsPerformance:
                 avg_ms = (duration / iterations) * 1000
 
                 print(f"\nAverage stat time: {avg_ms:.2f}ms")
-                assert (
-                    avg_ms < 5
-                ), f"Average stat time {avg_ms:.2f}ms exceeds 5ms target"
+                assert avg_ms < 5, f"Average stat time {avg_ms:.2f}ms exceeds 5ms target"
 
             finally:
                 await agent._db.close()
@@ -185,9 +179,7 @@ class TestQueryOperationsPerformance:
                 duration = (time.time() - start) * 1000
 
                 print(f"\nQuery time for 100 files with content: {duration:.2f}ms")
-                assert (
-                    duration < 500
-                ), f"Query took {duration:.2f}ms, exceeds 500ms target"
+                assert duration < 500, f"Query took {duration:.2f}ms, exceeds 500ms target"
                 assert len(files) == 100
                 assert all(f.content is not None for f in files)
 
@@ -256,12 +248,8 @@ class TestLargeFilePerformance:
                 print(f"10MB file read time: {read_duration:.2f}ms")
 
                 assert content == large_content
-                assert (
-                    write_duration < 500
-                ), f"Large file write took {write_duration:.2f}ms"
-                assert (
-                    read_duration < 500
-                ), f"Large file read took {read_duration:.2f}ms"
+                assert write_duration < 500, f"Large file write took {write_duration:.2f}ms"
+                assert read_duration < 500, f"Large file read took {read_duration:.2f}ms"
 
             finally:
                 await agent._db.close()
@@ -325,9 +313,7 @@ class TestKVStorePerformance:
                 avg_ms = (duration / iterations) * 1000
 
                 print(f"\nAverage KV set time: {avg_ms:.2f}ms")
-                assert (
-                    avg_ms < 5
-                ), f"Average KV set time {avg_ms:.2f}ms exceeds 5ms target"
+                assert avg_ms < 5, f"Average KV set time {avg_ms:.2f}ms exceeds 5ms target"
 
             finally:
                 await agent._db.close()
@@ -357,9 +343,7 @@ class TestKVStorePerformance:
                 avg_ms = (duration / iterations) * 1000
 
                 print(f"\nAverage KV get time: {avg_ms:.2f}ms")
-                assert (
-                    avg_ms < 5
-                ), f"Average KV get time {avg_ms:.2f}ms exceeds 5ms target"
+                assert avg_ms < 5, f"Average KV get time {avg_ms:.2f}ms exceeds 5ms target"
 
             finally:
                 await agent._db.close()
@@ -384,9 +368,7 @@ class TestKVStorePerformance:
                 duration = (time.time() - start) * 1000
 
                 print(f"\nKV list time for 100 entries: {duration:.2f}ms")
-                assert (
-                    duration < 20
-                ), f"KV list took {duration:.2f}ms, exceeds 20ms target"
+                assert duration < 20, f"KV list took {duration:.2f}ms, exceeds 20ms target"
                 assert len(entries) == 100
 
             finally:
@@ -425,9 +407,7 @@ class TestScalabilityPerformance:
                 duration = (time.time() - start) * 1000
 
                 print(f"Query time for 10,000 files: {duration:.2f}ms")
-                assert (
-                    duration < 500
-                ), f"Query took {duration:.2f}ms, exceeds 500ms target"
+                assert duration < 500, f"Query took {duration:.2f}ms, exceeds 500ms target"
                 assert len(files) == 10000
 
             finally:

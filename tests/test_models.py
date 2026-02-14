@@ -3,7 +3,7 @@
 from datetime import datetime, timedelta
 
 import pytest
-from agentfs_pydantic import (
+from fsdantic import (
     AgentFSOptions,
     FileEntry,
     FileStats,
@@ -37,12 +37,7 @@ def test_agentfs_options_requires_id_or_path():
 def test_file_stats():
     """Test FileStats model."""
     now = datetime.now()
-    stats = FileStats(
-        size=1024,
-        mtime=now,
-        is_file=True,
-        is_directory=False
-    )
+    stats = FileStats(size=1024, mtime=now, is_file=True, is_directory=False)
 
     assert stats.size == 1024
     assert stats.mtime == now
@@ -54,18 +49,9 @@ def test_file_stats():
 def test_file_entry():
     """Test FileEntry model."""
     now = datetime.now()
-    stats = FileStats(
-        size=1024,
-        mtime=now,
-        is_file=True,
-        is_directory=False
-    )
+    stats = FileStats(size=1024, mtime=now, is_file=True, is_directory=False)
 
-    entry = FileEntry(
-        path="/test/file.txt",
-        stats=stats,
-        content="test content"
-    )
+    entry = FileEntry(path="/test/file.txt", stats=stats, content="test content")
 
     assert entry.path == "/test/file.txt"
     assert entry.stats == stats
@@ -92,7 +78,7 @@ def test_tool_call():
         status="success",
         started_at=now,
         completed_at=now,
-        duration_ms=123.45
+        duration_ms=123.45,
     )
 
     assert call.id == 1
@@ -179,13 +165,7 @@ def test_tool_call_coerces_legacy_status_strings():
 
 def test_tool_call_stats():
     """Test ToolCallStats model."""
-    stats = ToolCallStats(
-        name="search",
-        total_calls=100,
-        successful=95,
-        failed=5,
-        avg_duration_ms=123.45
-    )
+    stats = ToolCallStats(name="search", total_calls=100, successful=95, failed=5, avg_duration_ms=123.45)
 
     assert stats.name == "search"
     assert stats.total_calls == 100
@@ -196,10 +176,7 @@ def test_tool_call_stats():
 
 def test_kv_entry():
     """Test KVEntry model."""
-    entry = KVEntry(
-        key="user:123",
-        value={"name": "Alice", "age": 30}
-    )
+    entry = KVEntry(key="user:123", value={"name": "Alice", "age": 30})
 
     assert entry.key == "user:123"
     assert entry.value == {"name": "Alice", "age": 30}
@@ -227,7 +204,7 @@ def test_view_query_custom():
         include_stats=False,
         regex_pattern=r"^/src/",
         max_size=10000,
-        min_size=100
+        min_size=100,
     )
 
     assert query.path_pattern == "*.py"

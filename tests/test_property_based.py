@@ -11,7 +11,7 @@ import pytest
 from agentfs_sdk import AgentFS, AgentFSOptions as SDKAgentFSOptions
 from hypothesis import given, strategies as st
 
-from agentfs_pydantic import AgentFSOptions, ViewQuery
+from fsdantic import AgentFSOptions, ViewQuery
 
 
 class TestAgentFSOptionsProperties:
@@ -31,9 +31,7 @@ class TestAgentFSOptionsProperties:
             options = AgentFSOptions(id=agent_id)
             assert options.id == agent_id
 
-    @given(
-        path=st.text(min_size=1, max_size=100).filter(lambda s: "/" in s or "\\" in s)
-    )
+    @given(path=st.text(min_size=1, max_size=100).filter(lambda s: "/" in s or "\\" in s))
     def test_valid_path_always_accepted(self, path):
         """Any valid path should be accepted."""
         try:
@@ -80,9 +78,7 @@ class TestOverlayIsolationProperties:
         agent1_content=st.text(min_size=0, max_size=1000),
         agent2_content=st.text(min_size=0, max_size=1000),
     )
-    async def test_overlay_isolation_property(
-        self, stable_content, agent1_content, agent2_content
-    ):
+    async def test_overlay_isolation_property(self, stable_content, agent1_content, agent2_content):
         """Property: Writing to agent overlays never affects stable or other agents.
 
         For any content written to stable and any agents:
@@ -121,9 +117,7 @@ class TestOverlayIsolationProperties:
     @given(
         filenames=st.lists(
             st.text(
-                alphabet=st.characters(
-                    whitelist_categories=("Lu", "Ll", "Nd"), whitelist_characters="-_."
-                ),
+                alphabet=st.characters(whitelist_categories=("Lu", "Ll", "Nd"), whitelist_characters="-_."),
                 min_size=1,
                 max_size=20,
             ),
@@ -340,9 +334,7 @@ class TestFileSystemProperties:
                 await agent._db.close()
 
     @pytest.mark.slow
-    @given(
-        content_size=st.integers(min_value=0, max_value=10000)
-    )
+    @given(content_size=st.integers(min_value=0, max_value=10000))
     async def test_file_size_property(self, content_size):
         """Property: File size matches content length.
 
