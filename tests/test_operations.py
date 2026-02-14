@@ -1,9 +1,8 @@
 """Tests for FileOperations helper class."""
 
 import pytest
-from agentfs_sdk import ErrnoException
-
 from fsdantic import FileOperations, FileStats
+from fsdantic.exceptions import FileNotFoundError, IsADirectoryError
 
 
 @pytest.mark.asyncio
@@ -128,10 +127,8 @@ class TestFileOperations:
 
         await ops.write_file("/dir/file.txt", "content")
 
-        with pytest.raises(ErrnoException) as exc_info:
+        with pytest.raises(IsADirectoryError):
             await ops.remove("/dir")
-
-        assert exc_info.value.code == "EISDIR"
 
     async def test_remove_directory_with_rm_recursive(self, agent_fs):
         """Should remove directories using AgentFS rm recursive semantics."""
@@ -202,9 +199,7 @@ class TestFileOperationsFallthrough:
         """Should raise FileNotFoundError if file in neither layer."""
         ops = FileOperations(agent_fs, base_fs=stable_fs)
 
-        from agentfs_sdk import ErrnoException
-
-        with pytest.raises(ErrnoException):
+        with pytest.raises(FileNotFoundError):
             await ops.read_file("/nonexistent.txt")
 
     async def test_write_only_to_overlay(self, agent_fs, stable_fs):
@@ -218,10 +213,9 @@ class TestFileOperationsFallthrough:
         assert overlay_content == "overlay content"
 
         # Should not exist in base
-        from agentfs_sdk import ErrnoException
-
-        with pytest.raises(ErrnoException):
-            await stable_fs.fs.read_file("/new-file.txt")
+        stable_ops = FileOperations(stable_fs)
+        with pytest.raises(FileNotFoundError):
+            await stable_ops.read_file("/new-file.txt")
 
     async def test_file_exists_checks_both_layers(self, agent_fs, stable_fs):
         """file_exists should check both layers."""

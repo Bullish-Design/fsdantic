@@ -11,7 +11,8 @@ from datetime import datetime
 import pytest
 from agentfs_sdk import AgentFS, AgentFSOptions as SDKAgentFSOptions
 
-from fsdantic import AgentFSOptions, FileEntry, FileStats, View, ViewQuery
+from fsdantic import AgentFSOptions, FileEntry, FileOperations, FileStats, View, ViewQuery
+from fsdantic.exceptions import FileNotFoundError
 
 
 @pytest.mark.asyncio
@@ -781,10 +782,9 @@ class TestErrorHandling:
             agent = await AgentFS.open(SDKAgentFSOptions(path=agent_path))
 
             try:
-                from agentfs_sdk import ErrnoException
-
-                with pytest.raises(ErrnoException):
-                    await agent.fs.read_file("/nonexistent.txt")
+                ops = FileOperations(agent)
+                with pytest.raises(FileNotFoundError):
+                    await ops.read_file("/nonexistent.txt")
 
             finally:
                 await agent._db.close()

@@ -5,6 +5,7 @@ from typing import Any, Optional
 
 from agentfs_sdk import AgentFS, ErrnoException
 
+from ._internal.errors import handle_agentfs_errors
 from .models import FileStats
 from .view import View, ViewQuery
 
@@ -32,6 +33,7 @@ class FileOperations:
         self.agent_fs = agent_fs
         self.base_fs = base_fs
 
+    @handle_agentfs_errors
     async def read_file(
         self, path: str, *, encoding: Optional[str] = "utf-8"
     ) -> str | bytes:
@@ -64,6 +66,7 @@ class FileOperations:
 
         return content
 
+    @handle_agentfs_errors
     async def write_file(
         self, path: str, content: str | bytes, *, encoding: str = "utf-8"
     ) -> None:
@@ -85,6 +88,7 @@ class FileOperations:
         # Always write to overlay
         await self.agent_fs.fs.write_file(path, content)
 
+    @handle_agentfs_errors
     async def file_exists(self, path: str) -> bool:
         """Check if file exists in overlay or base.
 
@@ -114,6 +118,7 @@ class FileOperations:
                     pass
             return False
 
+    @handle_agentfs_errors
     async def list_dir(self, path: str) -> list[str]:
         """List directory contents from overlay.
 
@@ -160,6 +165,7 @@ class FileOperations:
         files = await view.load()
         return [f.path for f in files]
 
+    @handle_agentfs_errors
     async def stat(self, path: str) -> FileStats:
         """Get file statistics.
 
@@ -194,6 +200,7 @@ class FileOperations:
                 )
             raise
 
+    @handle_agentfs_errors
     async def remove(self, path: str) -> None:
         """Remove a file from overlay.
 
@@ -212,6 +219,7 @@ class FileOperations:
         """
         await self.agent_fs.fs.unlink(path)
 
+    @handle_agentfs_errors
     async def tree(
         self, path: str = "/", max_depth: Optional[int] = None
     ) -> dict[str, Any]:
