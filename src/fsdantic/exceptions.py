@@ -9,6 +9,12 @@ class FsdanticError(Exception):
     """Base exception for all fsdantic errors."""
 
 
+class RepositoryError(FsdanticError):
+    """Base error for repository-related operations."""
+
+
+class FileSystemError(FsdanticError):
+    """Base error for filesystem operations."""
 class FileSystemError(FsdanticError):
     """Base error for filesystem operations.
 
@@ -64,8 +70,7 @@ class KeyNotFoundError(KVStoreError):
     """Raised when a key does not exist in the KV store."""
 
     def __init__(self, key: str) -> None:
-        message = f"Key not found: {key}"
-        super().__init__(message)
+        super().__init__(f"Key not found: {key}")
         self.key = key
 
 

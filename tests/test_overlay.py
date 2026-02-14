@@ -2,7 +2,8 @@
 
 import pytest
 
-from fsdantic import MergeStrategy, OverlayOperations
+from fsdantic import FileOperations, MergeStrategy, OverlayOperations
+from fsdantic.exceptions import FileNotFoundError
 
 
 @pytest.mark.asyncio
@@ -45,10 +46,9 @@ class TestOverlayOperationsMerge:
         assert await stable_fs.fs.read_file("/include/file.txt") == "include"
 
         # /exclude should not exist
-        from agentfs_sdk import ErrnoException
-
-        with pytest.raises(ErrnoException):
-            await stable_fs.fs.read_file("/exclude/file.txt")
+        stable_ops = FileOperations(stable_fs)
+        with pytest.raises(FileNotFoundError):
+            await stable_ops.read_file("/exclude/file.txt")
 
     async def test_merge_with_specific_file_path(self, agent_fs, stable_fs):
         """Should merge exactly one file when path points to a file."""
@@ -66,10 +66,9 @@ class TestOverlayOperationsMerge:
         assert result.errors == []
         assert await stable_fs.fs.read_file("/single-file") == "target content"
 
-        from agentfs_sdk import ErrnoException
-
-        with pytest.raises(ErrnoException):
-            await stable_fs.fs.read_file("/other-file")
+        stable_ops = FileOperations(stable_fs)
+        with pytest.raises(FileNotFoundError):
+            await stable_ops.read_file("/other-file")
 
     async def test_merge_files_merged_count(self, agent_fs, stable_fs):
         """Should count merged files correctly."""
@@ -470,7 +469,6 @@ class TestOverlayOperationsIntegration:
         # Stable should only have /keep.txt
         assert await stable_fs.fs.read_file("/keep.txt") == "keep"
 
-        from agentfs_sdk import ErrnoException
-
-        with pytest.raises(ErrnoException):
-            await stable_fs.fs.read_file("/discard.txt")
+        stable_ops = FileOperations(stable_fs)
+        with pytest.raises(FileNotFoundError):
+            await stable_ops.read_file("/discard.txt")
