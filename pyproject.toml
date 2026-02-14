@@ -49,22 +49,6 @@ include = [
 [tool.uv]
 prerelease = "allow"
 
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-testpaths = ["tests"]
-python_files = "test_*.py"
-python_classes = "Test*"
-python_functions = "test_*"
-markers = [
-    "benchmark: mark test as a performance benchmark",
-    "slow: mark test as slow (deselect with '-m \"not slow\"')",
-]
-addopts = [
-    "--strict-markers",
-    "--verbose",
-]
-
-
 [tool.ruff]
 line-length = 120
 target-version = "py313"

@@ -391,7 +391,7 @@ class View(BaseModel):
         return View(agent=self.agent, query=new_query)
 
     async def search_content(self) -> list[SearchMatch]:
-        """Search file contents matching query patterns.
+        r"""Search file contents matching query patterns.
 
         Returns:
             List of SearchMatch objects
@@ -527,7 +527,7 @@ class View(BaseModel):
         return View(agent=self.agent, query=new_query)
 
     def with_regex(self, pattern: str) -> "View":
-        """Create view with regex path filter.
+        r"""Create view with regex path filter.
 
         Args:
             pattern: Regex pattern for matching file paths
