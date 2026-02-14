@@ -143,7 +143,8 @@ class TestKVStoreIntegration:
 
                 entries = await agent.kv.list(prefix="config:")
                 assert len(entries) == 2
-                keys = [e.key for e in entries]
+                assert all("key" in e and "value" in e for e in entries)
+                keys = [e["key"] for e in entries]
                 assert "config:theme" in keys
                 assert "config:lang" in keys
 
