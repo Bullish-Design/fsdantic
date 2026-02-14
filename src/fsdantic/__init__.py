@@ -37,7 +37,7 @@ from .models import (
     ToolCallStatus,
     VersionedKVRecord,
 )
-from .operations import FileOperations
+from .files import FileManager
 from .overlay import (
     ConflictResolver,
     MergeConflict,
@@ -83,7 +83,7 @@ __all__ = [
     "MergeConflict",
     "ConflictResolver",
     # File operations
-    "FileOperations",
+    "FileManager",
     # Forward-architecture exceptions
     "FsdanticError",
     "FileSystemError",

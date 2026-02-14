@@ -5,7 +5,7 @@ from typing import Any
 from agentfs_sdk import AgentFS
 
 from .materialization import Materializer
-from .operations import FileOperations
+from .files import FileManager
 from .overlay import OverlayOperations
 
 
@@ -14,7 +14,7 @@ class Workspace:
 
     def __init__(self, raw: AgentFS):
         self._raw = raw
-        self._files: FileOperations | None = None
+        self._files: FileManager | None = None
         self._kv: Any | None = None
         self._overlay: OverlayOperations | None = None
         self._materialize: Materializer | None = None
@@ -26,10 +26,10 @@ class Workspace:
         return self._raw
 
     @property
-    def files(self) -> FileOperations:
-        """Lazy file operations manager."""
+    def files(self) -> FileManager:
+        """Lazy file manager."""
         if self._files is None:
-            self._files = FileOperations(self._raw)
+            self._files = FileManager(self._raw)
         return self._files
 
     @property

@@ -239,32 +239,15 @@ class View(BaseModel):
         self, root: str, include_stats: bool
     ) -> AsyncIterator[tuple[str, Any | None]]:
         """Traverse filesystem and yield file paths with optional raw stats."""
-        pending = [root]
+        from .files import FileManager
 
-        while pending:
-            path = pending.pop()
-            try:
-                items = await self.agent.fs.readdir(path)
-            except FileNotFoundError:
-                logger.debug("Directory disappeared during scan: %s", path)
-                continue
-
-            for item in items:
-                item_path = f"{path.rstrip('/')}/{item}"
-
-                try:
-                    stats = await self.agent.fs.stat(item_path)
-                except FileNotFoundError:
-                    logger.debug("Path disappeared before stat: %s", item_path)
-                    continue
-
-                if stats.is_directory():
-                    if self.query.recursive:
-                        pending.append(item_path)
-                    continue
-
-                if stats.is_file():
-                    yield item_path, stats if include_stats else None
+        manager = FileManager(self.agent)
+        async for item_path, stats in manager.traverse_files(
+            root,
+            recursive=self.query.recursive,
+            include_stats=include_stats,
+        ):
+            yield item_path, stats
 
     def _matches_pattern(self, path: str) -> bool:
         """Check if a path matches the query pattern.
