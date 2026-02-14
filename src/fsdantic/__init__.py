@@ -20,7 +20,7 @@ from .exceptions import (
     ValidationError,
 )
 from .client import Fsdantic
-from .files import FileManager
+from .files import FileManager, FileQuery
 from .kv import KVManager
 from .operations import FileOperations
 from .materialization import (
@@ -47,6 +47,7 @@ from .overlay import (
     MergeResult,
     MergeStrategy,
     OverlayManager,
+    OverlayOperations,
 )
 from .repository import NamespacedKVStore, TypedKVRepository
 from .workspace import Workspace
@@ -60,9 +61,10 @@ __all__ = [
     "Workspace",
     # Managers
     "FileManager",
-    "FileOperations",  # Compatibility alias (prefer FileManager)
+    "FileQuery",
     "KVManager",
     "OverlayManager",
+    "OverlayOperations",
     "MaterializationManager",
     # Models
     "AgentFSOptions",
