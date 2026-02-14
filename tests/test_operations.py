@@ -516,7 +516,7 @@ class TestFileManagerEdgeCases:
 
         assert isinstance(overlay_stats, FileStats)
         assert isinstance(base_stats, FileStats)
-        assert overlay_stats.model_fields.keys() == base_stats.model_fields.keys()
+        assert type(overlay_stats).model_fields.keys() == type(base_stats).model_fields.keys()
 
 
 @pytest.mark.asyncio
