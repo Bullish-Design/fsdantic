@@ -11,6 +11,7 @@ from typing import Any, Callable, Optional
 from agentfs_sdk import AgentFS
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
+from ._internal.paths import normalize_glob_pattern, normalize_path
 from .models import FileEntry, FileStats
 
 
@@ -110,9 +111,12 @@ class ViewQuery(BaseModel):
     @staticmethod
     def _normalize_path_pattern(pattern: str) -> str:
         """Normalize patterns so basename-only globs match across directories."""
-        if "/" in pattern:
-            return pattern
-        return f"**/{pattern}"
+        normalized = normalize_glob_pattern(pattern)
+        if "/" not in normalized:
+            normalized = f"**/{normalized}"
+        if not normalized.startswith("/"):
+            normalized = f"/{normalized}"
+        return normalized
 
     @staticmethod
     def _compile_glob_pattern(pattern: str) -> re.Pattern[str]:
@@ -162,13 +166,13 @@ class ViewQuery(BaseModel):
 
     def matches_path(self, path: str) -> bool:
         """Match a path against the prepared glob strategy."""
-        return bool(self._path_matcher.match(path))
+        return bool(self._path_matcher.match(normalize_path(path)))
 
     def matches_regex(self, path: str) -> bool:
         """Match a path against optional regex filter."""
         if self._regex_matcher is None:
             return True
-        return bool(self._regex_matcher.search(path))
+        return bool(self._regex_matcher.search(normalize_path(path)))
 
 
 class View(BaseModel):
@@ -209,6 +213,7 @@ class View(BaseModel):
         include_content = self.query.include_content
 
         async for item_path, stats in self._traverse_files("/", include_stats=include_stats):
+            item_path = normalize_path(item_path)
             if not self._matches_pattern(item_path):
                 continue
             if not self.query.matches_regex(item_path):
@@ -241,6 +246,7 @@ class View(BaseModel):
         """Traverse filesystem and yield file paths with optional raw stats."""
         from .files import FileManager
 
+        root = normalize_path(root)
         manager = FileManager(self.agent)
         async for item_path, stats in manager.traverse_files(
             root,
@@ -258,7 +264,7 @@ class View(BaseModel):
         Returns:
             True if path matches the pattern
         """
-        return self.query.matches_path(path)
+        return self.query.matches_path(normalize_path(path))
 
     def _needs_file_stats(self) -> bool:
         """Whether file-level stat data is needed by query options."""
@@ -332,6 +338,7 @@ class View(BaseModel):
         include_stats = self.query.min_size is not None or self.query.max_size is not None
 
         async for item_path, stats in self._traverse_files("/", include_stats=include_stats):
+            item_path = normalize_path(item_path)
             if not self._matches_pattern(item_path):
                 continue
             if not self.query.matches_regex(item_path):

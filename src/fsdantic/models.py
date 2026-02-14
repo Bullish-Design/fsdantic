@@ -7,6 +7,8 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
+from ._internal.paths import normalize_path
+
 
 class AgentFSOptions(BaseModel):
     """Options for opening an AgentFS filesystem.
@@ -207,6 +209,14 @@ class FileEntry(BaseModel):
     """
 
     path: str = Field(description="File path")
+
+    @field_validator("path", mode="before")
+    @classmethod
+    def normalize_entry_path(cls, value: Any) -> str:
+        """Normalize file paths so API outputs are consistent."""
+        if not isinstance(value, str):
+            raise ValueError("path must be a string")
+        return normalize_path(value)
     stats: Optional[FileStats] = Field(
         None,
         description="File statistics/metadata"
