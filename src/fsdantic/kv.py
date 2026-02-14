@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from pydantic import BaseModel
+
 from agentfs_sdk import AgentFS
 
 from .exceptions import KVStoreError, KeyNotFoundError, SerializationError
@@ -194,17 +196,36 @@ class KVManager:
             if item["key"].startswith(self._prefix)
         ]
 
-    def repository(self, prefix: str = "") -> TypedKVRepository:
-        """Create a typed repository bridged to this manager namespace.
+    def repository(
+        self,
+        prefix: str = "",
+        model_type: type[BaseModel] | None = None,
+    ) -> TypedKVRepository:
+        """Create a typed repository scoped to this manager namespace.
 
-        Use this when you want typed, model-validated records instead of raw
-        simple KV values.
+        Args:
+            prefix: Optional child namespace for repository keys, composed
+                with this manager's namespace using canonical `:` semantics.
+            model_type: Optional default model class for typed loading APIs.
+
+        Returns:
+            A `TypedKVRepository` configured as the implementation engine for
+            model validation and typed load/list operations.
+
+        Examples:
+            >>> await workspace.kv.set("theme", "dark")
+            >>> theme = await workspace.kv.get("theme")
+            >>>
+            >>> users = workspace.kv.repository(prefix="user:", model_type=UserRecord)
+            >>> await users.save("alice", UserRecord(name="Alice"))
+            >>> alice = await users.load("alice")
         """
         from .repository import TypedKVRepository
 
         return TypedKVRepository(
             self._agent_fs,
             prefix=self._compose_prefix(self._prefix, prefix),
+            model_type=model_type,
         )
 
     def namespace(self, prefix: str) -> "KVManager":
