@@ -1,9 +1,11 @@
 """Primary public API for file operations and traversal."""
 
 import logging
+import codecs
+import json
 import re
 from collections.abc import AsyncIterator
-from typing import Any, Optional
+from typing import Any, Literal, Optional, overload
 
 from agentfs_sdk import AgentFS, ErrnoException
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
@@ -104,17 +106,63 @@ class FileQuery(BaseModel):
 class FileManager:
     """Primary high-level API for file operations with optional base fallthrough."""
 
+    _JSON_INDENT = 2
+    _JSON_SEPARATORS = (",", ": ")
+
     def __init__(self, agent_fs: AgentFS, base_fs: Optional[AgentFS] = None):
         self.agent_fs = agent_fs
         self.base_fs = base_fs
 
-    async def read(self, path: str, *, encoding: Optional[str] = "utf-8") -> str | bytes:
-        """Read a file with overlay-first and optional base fallthrough semantics."""
+    @overload
+    async def read(
+        self,
+        path: str,
+        *,
+        mode: Literal["text"] = "text",
+        encoding: str = "utf-8",
+    ) -> str: ...
+
+    @overload
+    async def read(
+        self,
+        path: str,
+        *,
+        mode: Literal["binary"],
+        encoding: None = None,
+    ) -> bytes: ...
+
+    async def read(
+        self,
+        path: str,
+        *,
+        mode: Literal["text", "binary"] = "text",
+        encoding: Optional[str] = "utf-8",
+    ) -> str | bytes:
+        """Read a file using explicit mode semantics.
+
+        Reads from overlay first and falls through to ``base_fs`` on ``ENOENT``.
+
+        * ``mode='text'`` returns ``str`` and requires a valid text ``encoding``.
+        * ``mode='binary'`` returns ``bytes`` and requires ``encoding=None``.
+        """
         path = normalize_path(path)
         context = f"FileManager.read(path={path!r})"
+        resolved_encoding: Optional[str]
+
+        if mode == "text":
+            if encoding is None:
+                raise ValueError("encoding must be provided when mode='text'")
+            self._validate_encoding(encoding)
+            resolved_encoding = encoding
+        elif mode == "binary":
+            if encoding is not None:
+                raise ValueError("encoding must be None when mode='binary'")
+            resolved_encoding = None
+        else:
+            raise ValueError("mode must be 'text' or 'binary'")
 
         try:
-            return await self.agent_fs.fs.read_file(path, encoding=encoding)
+            return await self.agent_fs.fs.read_file(path, encoding=resolved_encoding)
         except ErrnoException as e:
             if e.code != "ENOENT":
                 raise translate_agentfs_error(e, context) from e
@@ -122,21 +170,90 @@ class FileManager:
                 raise translate_agentfs_error(e, context) from e
 
         try:
-            return await self.base_fs.fs.read_file(path, encoding=encoding)
+            return await self.base_fs.fs.read_file(path, encoding=resolved_encoding)
         except ErrnoException as base_error:
             raise translate_agentfs_error(base_error, context) from base_error
 
-    async def write(self, path: str, content: str | bytes, *, encoding: str = "utf-8") -> None:
-        """Write a file to overlay filesystem only."""
+    async def write(
+        self,
+        path: str,
+        content: str | bytes | dict[str, Any] | list[Any],
+        *,
+        mode: Literal["text", "binary", "json"] | None = None,
+        encoding: str = "utf-8",
+    ) -> None:
+        """Write to overlay filesystem only.
+
+        Existing files are overwritten. Parent directories are created automatically
+        by AgentFS when needed.
+
+        ``content`` may be ``str``, ``bytes``, ``dict``, or ``list``.
+        ``mode`` may be specified explicitly (``text``/``binary``/``json``) or inferred
+        from content type.
+        """
         path = normalize_path(path)
-        if isinstance(content, str):
-            content = content.encode(encoding)
+        payload = self._prepare_write_payload(content, mode=mode, encoding=encoding)
 
         context = f"FileManager.write(path={path!r})"
         try:
-            await self.agent_fs.fs.write_file(path, content)
+            await self.agent_fs.fs.write_file(path, payload)
         except ErrnoException as e:
             raise translate_agentfs_error(e, context) from e
+
+    @staticmethod
+    def _validate_encoding(encoding: str) -> None:
+        try:
+            codecs.lookup(encoding)
+        except LookupError as e:
+            raise ValueError(f"Unknown encoding: {encoding}") from e
+
+    @classmethod
+    def _serialize_json(cls, content: dict[str, Any] | list[Any]) -> str:
+        return json.dumps(
+            content,
+            ensure_ascii=False,
+            indent=cls._JSON_INDENT,
+            separators=cls._JSON_SEPARATORS,
+        )
+
+    @classmethod
+    def _prepare_write_payload(
+        cls,
+        content: str | bytes | dict[str, Any] | list[Any],
+        *,
+        mode: Literal["text", "binary", "json"] | None,
+        encoding: str,
+    ) -> bytes:
+        inferred_mode: Literal["text", "binary", "json"]
+        if mode is None:
+            if isinstance(content, bytes):
+                inferred_mode = "binary"
+            elif isinstance(content, str):
+                inferred_mode = "text"
+            elif isinstance(content, (dict, list)):
+                inferred_mode = "json"
+            else:
+                raise TypeError("content must be str, bytes, dict, or list")
+        else:
+            inferred_mode = mode
+
+        if inferred_mode == "binary":
+            if not isinstance(content, bytes):
+                raise TypeError("mode='binary' requires bytes content")
+            return content
+
+        cls._validate_encoding(encoding)
+        if inferred_mode == "text":
+            if not isinstance(content, str):
+                raise TypeError("mode='text' requires str content")
+            return content.encode(encoding)
+
+        if inferred_mode == "json":
+            if not isinstance(content, (dict, list)):
+                raise TypeError("mode='json' requires dict or list content")
+            return cls._serialize_json(content).encode(encoding)
+
+        raise ValueError("mode must be 'text', 'binary', or 'json'")
 
     async def exists(self, path: str) -> bool:
         """Check whether a path exists in overlay or base."""
