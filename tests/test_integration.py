@@ -388,7 +388,7 @@ class TestPydanticModelsIntegration:
                     size=sdk_stats.size,
                     mtime=sdk_stats.mtime,
                     is_file=sdk_stats.is_file(),
-                    is_directory=sdk_stats.is_dir(),
+                    is_directory=sdk_stats.is_directory(),
                 )
 
                 # Verify
@@ -420,7 +420,7 @@ class TestPydanticModelsIntegration:
                         size=sdk_stats.size,
                         mtime=sdk_stats.mtime,
                         is_file=sdk_stats.is_file(),
-                        is_directory=sdk_stats.is_dir(),
+                        is_directory=sdk_stats.is_directory(),
                     ),
                     content=content,
                 )
