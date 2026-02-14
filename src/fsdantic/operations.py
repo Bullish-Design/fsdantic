@@ -182,9 +182,14 @@ class FileOperations:
             raise
 
     async def remove(self, path: str) -> None:
-        """Remove file from overlay.
+        """Remove a file from overlay.
 
-        This creates a whiteout in the overlay if file exists in base.
+        This method only supports file paths. Use the underlying AgentFS
+        directory APIs (for example ``rm(..., recursive=True)``) when you need
+        directory removal semantics.
+
+        Removing a file from the overlay creates a whiteout if the file exists
+        in the base layer.
 
         Args:
             path: File path to remove
@@ -192,7 +197,7 @@ class FileOperations:
         Examples:
             >>> await ops.remove("temp.txt")
         """
-        await self.agent_fs.fs.remove(path)
+        await self.agent_fs.fs.unlink(path)
 
     async def tree(
         self, path: str = "/", max_depth: Optional[int] = None

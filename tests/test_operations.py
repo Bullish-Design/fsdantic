@@ -1,6 +1,7 @@
 """Tests for FileOperations helper class."""
 
 import pytest
+from agentfs_sdk import ErrnoException
 
 from fsdantic import FileOperations
 
@@ -119,6 +120,26 @@ class TestFileOperations:
 
         await ops.remove("/to-delete.txt")
         assert not await ops.file_exists("/to-delete.txt")
+
+    async def test_remove_directory_raises_for_file_only_semantics(self, agent_fs):
+        """Should reject directory paths for remove()."""
+        ops = FileOperations(agent_fs)
+
+        await ops.write_file("/dir/file.txt", "content")
+
+        with pytest.raises(ErrnoException) as exc_info:
+            await ops.remove("/dir")
+
+        assert exc_info.value.code == "EISDIR"
+
+    async def test_remove_directory_with_rm_recursive(self, agent_fs):
+        """Should remove directories using AgentFS rm recursive semantics."""
+        ops = FileOperations(agent_fs)
+
+        await ops.write_file("/dir/sub/file.txt", "content")
+        await agent_fs.fs.rm("/dir", recursive=True)
+
+        assert await ops.file_exists("/dir/sub/file.txt") is False
 
     async def test_tree_structure(self, agent_fs):
         """Should generate directory tree."""
