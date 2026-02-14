@@ -38,6 +38,7 @@ from .models import (
     VersionedKVRecord,
 )
 from .files import FileManager, FileQuery
+from .kv import KVManager
 from .overlay import (
     ConflictResolver,
     MergeConflict,
@@ -85,6 +86,7 @@ __all__ = [
     # File operations
     "FileManager",
     "FileQuery",
+    "KVManager",
     # Forward-architecture exceptions
     "FsdanticError",
     "FileSystemError",

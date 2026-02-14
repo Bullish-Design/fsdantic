@@ -1,11 +1,10 @@
 """Workspace façade around AgentFS with lazy manager loading."""
 
-from typing import Any
-
 from agentfs_sdk import AgentFS
 
-from .materialization import Materializer
 from .files import FileManager
+from .kv import KVManager
+from .materialization import Materializer
 from .overlay import OverlayOperations
 
 
@@ -15,7 +14,7 @@ class Workspace:
     def __init__(self, raw: AgentFS):
         self._raw = raw
         self._files: FileManager | None = None
-        self._kv: Any | None = None
+        self._kv: KVManager | None = None
         self._overlay: OverlayOperations | None = None
         self._materialize: Materializer | None = None
         self._closed = False
@@ -33,10 +32,10 @@ class Workspace:
         return self._files
 
     @property
-    def kv(self) -> Any:
-        """Lazy key-value manager (currently backed by AgentFS kv API)."""
+    def kv(self) -> KVManager:
+        """Lazy key-value manager for simple and typed KV workflows."""
         if self._kv is None:
-            self._kv = self._raw.kv
+            self._kv = KVManager(self._raw)
         return self._kv
 
     @property
