@@ -198,8 +198,8 @@ class Materializer:
             else:
                 # Size same, check content
                 try:
-                    overlay_content = await overlay_fs.fs.read_file(file_path)
-                    base_content = await base_fs.fs.read_file(file_path)
+                    overlay_content = await overlay_fs.fs.read_file(file_path, encoding=None)
+                    base_content = await base_fs.fs.read_file(file_path, encoding=None)
 
                     if overlay_content != base_content:
                         changes.append(
@@ -286,7 +286,7 @@ class Materializer:
                             continue
 
                     # Read content
-                    content = await source_fs.fs.read_file(entry_path)
+                    content = await source_fs.fs.read_file(entry_path, encoding=None)
 
                     # Write to disk
                     local_file.write_bytes(content)

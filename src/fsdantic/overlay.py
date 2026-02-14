@@ -184,13 +184,13 @@ class OverlayOperations:
 
                 # Handle file
                 if source_stat.is_file():
-                    source_content = await source.fs.read_file(source_path)
+                    source_content = await source.fs.read_file(source_path, encoding=None)
 
                     # Check if file exists in target
                     target_exists = False
                     target_content = None
                     try:
-                        target_content = await target.fs.read_file(source_path)
+                        target_content = await target.fs.read_file(source_path, encoding=None)
                         target_exists = True
                     except ErrnoException as e:
                         if e.code != "ENOENT":
