@@ -32,7 +32,7 @@ pip install fsdantic
 ```python
 import asyncio
 from agentfs_sdk import AgentFS
-from fsdantic import AgentFSOptions, View, ViewQuery, FileOperations
+from fsdantic import AgentFSOptions, View, ViewQuery, FileManager
 
 async def main():
     # Create validated options
@@ -40,9 +40,9 @@ async def main():
 
     async with await AgentFS.open(options.model_dump()) as agent:
         # Simple file operations
-        ops = FileOperations(agent)
-        await ops.write_file("hello.txt", "Hello, World!")
-        content = await ops.read_file("hello.txt")
+        ops = FileManager(agent)
+        await ops.write("hello.txt", "Hello, World!")
+        content = await ops.read("hello.txt")
 
         # Create a view to query the filesystem
         view = View(
@@ -418,18 +418,18 @@ removed = await ops.reset_overlay(agent_fs)
 Simplified file operations with automatic fallthrough:
 
 ```python
-from fsdantic import FileOperations
+from fsdantic import FileManager
 
-ops = FileOperations(agent_fs, base_fs=stable_fs)
+ops = FileManager(agent_fs, base_fs=stable_fs)
 
 # Read with fallthrough (tries overlay, then base)
-content = await ops.read_file("config.json")
+content = await ops.read("config.json")
 
 # Write to overlay only
-await ops.write_file("output.txt", "Hello World")
+await ops.write("output.txt", "Hello World")
 
 # Search files
-python_files = await ops.search_files("**/*.py")
+python_files = await ops.search("**/*.py")
 
 # Get typed file stats
 stats = await ops.stat("config.json")
