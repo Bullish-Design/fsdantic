@@ -5,7 +5,8 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Callable, Optional
+from collections.abc import AsyncIterator
+from typing import Any, Callable, Optional
 
 from agentfs_sdk import AgentFS
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
@@ -204,87 +205,66 @@ class View(BaseModel):
             ...     print(file.path)
         """
         entries: list[FileEntry] = []
+        include_stats = self._needs_file_stats()
+        include_content = self.query.include_content
 
-        # Start from root
-        await self._scan_directory("/", entries)
+        async for item_path, stats in self._traverse_files("/", include_stats=include_stats):
+            if not self._matches_pattern(item_path):
+                continue
+            if not self.query.matches_regex(item_path):
+                continue
+            if not self._matches_size_filter(stats):
+                continue
 
-        # Apply size filters
-        if self.query.max_size is not None or self.query.min_size is not None:
-            entries = [
-                e for e in entries
-                if self._matches_size_filter(e)
-            ]
+            content = None
+            if include_content:
+                try:
+                    content = await self.agent.fs.read_file(item_path)
+                except FileNotFoundError:
+                    logger.debug("Path disappeared before read: %s", item_path)
+                except Exception:
+                    logger.exception("Failed reading file content for %s", item_path)
 
-        # Apply regex pattern if provided
-        if self.query.regex_pattern:
-            entries = [
-                e for e in entries
-                if self.query.matches_regex(e.path)
-            ]
+            entries.append(
+                FileEntry(
+                    path=item_path,
+                    stats=self._to_file_stats(stats) if self.query.include_stats and stats else None,
+                    content=content,
+                )
+            )
 
         return entries
 
-    async def _scan_directory(
-        self,
-        path: str,
-        entries: list[FileEntry]
-    ) -> None:
-        """Recursively scan a directory for matching files.
+    async def _traverse_files(
+        self, root: str, include_stats: bool
+    ) -> AsyncIterator[tuple[str, Any | None]]:
+        """Traverse filesystem and yield file paths with optional raw stats."""
+        pending = [root]
 
-        Args:
-            path: Directory path to scan
-            entries: List to append matching entries to
-        """
-        try:
-            # List directory contents
-            items = await self.agent.fs.readdir(path)
-        except FileNotFoundError:
-            logger.debug("Directory disappeared during scan: %s", path)
-            return
-
-        for item in items:
-            # Construct full path
-            item_path = f"{path.rstrip('/')}/{item}"
-
+        while pending:
+            path = pending.pop()
             try:
-                # Get file stats
-                stats = await self.agent.fs.stat(item_path)
+                items = await self.agent.fs.readdir(path)
             except FileNotFoundError:
-                logger.debug("Path disappeared before stat: %s", item_path)
+                logger.debug("Directory disappeared during scan: %s", path)
                 continue
 
-            # Convert to our FileStats model
-            file_stats = FileStats(
-                size=stats.size,
-                mtime=stats.mtime,
-                is_file=stats.is_file(),
-                is_directory=stats.is_directory(),
-            )
+            for item in items:
+                item_path = f"{path.rstrip('/')}/{item}"
 
-            if file_stats.is_directory:
-                # Recursively scan subdirectory if enabled
-                if self.query.recursive:
-                    await self._scan_directory(item_path, entries)
-            elif file_stats.is_file:
-                # Check if file matches pattern
-                if self._matches_pattern(item_path):
-                    # Load content if requested
-                    content = None
-                    if self.query.include_content:
-                        try:
-                            content = await self.agent.fs.read_file(item_path)
-                        except FileNotFoundError:
-                            logger.debug("Path disappeared before read: %s", item_path)
-                        except Exception:
-                            logger.exception("Failed reading file content for %s", item_path)
+                try:
+                    stats = await self.agent.fs.stat(item_path)
+                except FileNotFoundError:
+                    logger.debug("Path disappeared before stat: %s", item_path)
+                    continue
 
-                    # Create entry
-                    entry = FileEntry(
-                        path=item_path,
-                        stats=file_stats if self.query.include_stats else None,
-                        content=content,
-                    )
-                    entries.append(entry)
+                if stats.is_directory():
+                    if self.query.recursive:
+                        pending.append(item_path)
+                    continue
+
+                if stats.is_file():
+                    yield item_path, stats if include_stats else None
 
     def _matches_pattern(self, path: str) -> bool:
         """Check if a path matches the query pattern.
@@ -297,24 +277,41 @@ class View(BaseModel):
         """
         return self.query.matches_path(path)
 
-    def _matches_size_filter(self, entry: FileEntry) -> bool:
-        """Check if an entry matches size filters.
+    def _needs_file_stats(self) -> bool:
+        """Whether file-level stat data is needed by query options."""
+        return (
+            self.query.include_stats
+            or self.query.min_size is not None
+            or self.query.max_size is not None
+        )
+
+    def _to_file_stats(self, raw_stats: Any) -> FileStats:
+        """Convert AgentFS stats object to FileStats model."""
+        return FileStats(
+            size=raw_stats.size,
+            mtime=raw_stats.mtime,
+            is_file=raw_stats.is_file(),
+            is_directory=raw_stats.is_directory(),
+        )
+
+    def _matches_size_filter(self, raw_stats: Any | None) -> bool:
+        """Check if a file's raw stats match size filters.
 
         Args:
-            entry: File entry to check
+            raw_stats: AgentFS stats object
 
         Returns:
             True if entry matches size constraints
         """
-        if not entry.stats:
+        if raw_stats is None:
             return True
 
         if self.query.min_size is not None:
-            if entry.stats.size < self.query.min_size:
+            if raw_stats.size < self.query.min_size:
                 return False
 
         if self.query.max_size is not None:
-            if entry.stats.size > self.query.max_size:
+            if raw_stats.size > self.query.max_size:
                 return False
 
         return True
@@ -348,16 +345,19 @@ class View(BaseModel):
             >>> count = await view.count()
             >>> print(f"Found {count} matching files")
         """
-        # Temporarily disable content loading for counting
-        original_include_content = self.query.include_content
-        self.query.include_content = False
+        count = 0
+        include_stats = self.query.min_size is not None or self.query.max_size is not None
 
-        try:
-            entries = await self.load()
-            return len(entries)
-        finally:
-            # Restore original setting
-            self.query.include_content = original_include_content
+        async for item_path, stats in self._traverse_files("/", include_stats=include_stats):
+            if not self._matches_pattern(item_path):
+                continue
+            if not self.query.matches_regex(item_path):
+                continue
+            if not self._matches_size_filter(stats):
+                continue
+            count += 1
+
+        return count
 
     def with_pattern(self, pattern: str) -> "View":
         """Create a new view with a different path pattern.
