@@ -19,6 +19,7 @@ from .exceptions import (
     SerializationError,
     ValidationError,
 )
+from .client import Fsdantic
 from .materialization import (
     ConflictResolution,
     FileChange,
@@ -45,12 +46,15 @@ from .overlay import (
     OverlayOperations,
 )
 from .repository import NamespacedKVStore, TypedKVRepository
+from .workspace import Workspace
 from .view import SearchMatch, View, ViewQuery
 
 __version__ = "0.2.0"
 
 __all__ = [
     # Core models
+    "Fsdantic",
+    "Workspace",
     "AgentFSOptions",
     "FileEntry",
     "FileStats",

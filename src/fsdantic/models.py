@@ -27,16 +27,26 @@ class AgentFSOptions(BaseModel):
         description="Custom database path"
     )
 
-    @field_validator("id", "path")
+    @field_validator("id", "path", mode="before")
     @classmethod
-    def validate_id_or_path(cls, v, info):
-        """Ensure at least one of id or path is provided."""
+    def validate_id_or_path(cls, v: Any) -> Optional[str]:
+        """Validate selector type and emptiness."""
+        if v is None:
+            return None
+        if not isinstance(v, str):
+            raise TypeError("Selector values must be strings")
+        if v is not None and not v.strip():
+            raise ValueError("Selector values cannot be empty")
         return v
 
-    def model_post_init(self, __context: Any) -> None:
-        """Validate that at least one of id or path is provided."""
+    @model_validator(mode="after")
+    def validate_exclusive_selector(self) -> "AgentFSOptions":
+        """Require exactly one selector for onboarding."""
         if not self.id and not self.path:
             raise ValueError("Either 'id' or 'path' must be provided")
+        if self.id and self.path:
+            raise ValueError("Provide exactly one of 'id' or 'path', not both")
+        return self
 
 
 class FileStats(BaseModel):
