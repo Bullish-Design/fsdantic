@@ -4,7 +4,7 @@ import asyncio
 from datetime import datetime
 
 from agentfs_sdk import AgentFS
-from agentfs_pydantic import AgentFSOptions, View, ViewQuery
+from fsdantic import AgentFSOptions, View, ViewQuery
 
 
 async def main():

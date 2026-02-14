@@ -1,5 +1,13 @@
 """Fsdantic - Type-safe Pydantic interface for AgentFS SDK."""
 
+from .exceptions import (
+    ContentSearchError,
+    FsdanticError,
+    MaterializationError,
+    MergeConflictError,
+    RepositoryError,
+    ValidationError,
+)
 from .materialization import (
     ConflictResolution,
     FileChange,
@@ -61,4 +69,11 @@ __all__ = [
     "ConflictResolver",
     # File operations
     "FileOperations",
+    # Exceptions
+    "FsdanticError",
+    "RepositoryError",
+    "MaterializationError",
+    "MergeConflictError",
+    "ValidationError",
+    "ContentSearchError",
 ]

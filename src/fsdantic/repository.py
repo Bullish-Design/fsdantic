@@ -157,6 +157,54 @@ class TypedKVRepository(Generic[T]):
 
         return ids
 
+    async def save_batch(self, records: list[tuple[str, T]]) -> None:
+        """Save multiple records in batch.
+
+        Args:
+            records: List of (id, record) tuples to save
+
+        Examples:
+            >>> await repo.save_batch([
+            ...     ("user1", UserRecord(name="Alice", age=30)),
+            ...     ("user2", UserRecord(name="Bob", age=25))
+            ... ])
+        """
+        for record_id, record in records:
+            await self.save(record_id, record)
+
+    async def delete_batch(self, ids: list[str]) -> None:
+        """Delete multiple records in batch.
+
+        Args:
+            ids: List of record IDs to delete
+
+        Examples:
+            >>> await repo.delete_batch(["user1", "user2", "user3"])
+        """
+        for record_id in ids:
+            await self.delete(record_id)
+
+    async def load_batch(self, ids: list[str], model_type: Type[T]) -> dict[str, Optional[T]]:
+        """Load multiple records in batch.
+
+        Args:
+            ids: List of record IDs to load
+            model_type: Pydantic model class
+
+        Returns:
+            Dictionary mapping IDs to records (None if not found)
+
+        Examples:
+            >>> records = await repo.load_batch(["user1", "user2"], UserRecord)
+            >>> for id, record in records.items():
+            ...     if record:
+            ...         print(f"{id}: {record.name}")
+        """
+        results = {}
+        for record_id in ids:
+            results[record_id] = await self.load(record_id, model_type)
+        return results
+
 
 class NamespacedKVStore:
     """Convenience wrapper for creating namespaced repositories.
