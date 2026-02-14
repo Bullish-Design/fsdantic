@@ -8,7 +8,7 @@ from fsdantic import (
     FsdanticError,
     MaterializationError,
     MergeConflictError,
-    RepositoryError,
+    KVStoreError,
     TypedKVRepository,
     ValidationError,
     View,
@@ -153,16 +153,16 @@ class TestCustomExceptions:
 
     def test_fsdantic_error_is_base(self):
         """FsdanticError should be base for all custom exceptions."""
-        assert issubclass(RepositoryError, FsdanticError)
+        assert issubclass(KVStoreError, FsdanticError)
         assert issubclass(MaterializationError, FsdanticError)
         assert issubclass(MergeConflictError, FsdanticError)
         assert issubclass(ValidationError, FsdanticError)
         assert issubclass(ContentSearchError, FsdanticError)
 
-    def test_repository_error(self):
-        """Should create and catch RepositoryError."""
-        with pytest.raises(RepositoryError):
-            raise RepositoryError("Test repository error")
+    def test_kv_store_error(self):
+        """Should create and catch KVStoreError."""
+        with pytest.raises(KVStoreError):
+            raise KVStoreError("Test KV store error")
 
     def test_materialization_error(self):
         """Should create and catch MaterializationError."""
@@ -200,7 +200,7 @@ class TestCustomExceptions:
     def test_exception_hierarchy(self):
         """Custom exceptions should be catchable as FsdanticError."""
         with pytest.raises(FsdanticError):
-            raise RepositoryError("Any fsdantic error")
+            raise KVStoreError("Any fsdantic error")
 
         with pytest.raises(FsdanticError):
             raise MaterializationError("Any fsdantic error")
@@ -260,13 +260,13 @@ class TestImportedExceptions:
             FsdanticError,
             MaterializationError,
             MergeConflictError,
-            RepositoryError,
+            KVStoreError,
             ValidationError,
         )
 
         # Should not raise
         assert FsdanticError
-        assert RepositoryError
+        assert KVStoreError
         assert MaterializationError
         assert MergeConflictError
         assert ValidationError
@@ -277,7 +277,7 @@ class TestImportedExceptions:
         import fsdantic
 
         assert "FsdanticError" in fsdantic.__all__
-        assert "RepositoryError" in fsdantic.__all__
+        assert "KVStoreError" in fsdantic.__all__
         assert "MaterializationError" in fsdantic.__all__
         assert "MergeConflictError" in fsdantic.__all__
         assert "ValidationError" in fsdantic.__all__

@@ -15,6 +15,13 @@ class RepositoryError(FsdanticError):
 
 class FileSystemError(FsdanticError):
     """Base error for filesystem operations."""
+class FileSystemError(FsdanticError):
+    """Base error for filesystem operations.
+
+    Attributes:
+        path: Filesystem path associated with the failure, if known.
+        cause: Original low-level exception, if available.
+    """
 
     def __init__(
         self,
