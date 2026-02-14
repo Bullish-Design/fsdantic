@@ -194,6 +194,12 @@ except FileNotFoundError:
 except InvalidPathError:
     raise  # caller provided invalid input; propagate
 
+# Reading a directory path is normalized to file-not-found for compatibility
+try:
+    await workspace.files.read("/some-directory")
+except FileNotFoundError:
+    pass
+
 # Directory removal policy
 try:
     await workspace.files.remove("/tmp", recursive=False)
