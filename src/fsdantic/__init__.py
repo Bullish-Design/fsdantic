@@ -20,6 +20,8 @@ from .exceptions import (
     ValidationError,
 )
 from .client import Fsdantic
+from .files import FileManager
+from .kv import KVManager
 from .materialization import (
     ConflictResolution,
     FileChange,
@@ -38,15 +40,12 @@ from .models import (
     ToolCallStatus,
     VersionedKVRecord,
 )
-from .files import FileManager, FileQuery
-from .kv import KVManager
 from .overlay import (
     ConflictResolver,
     MergeConflict,
     MergeResult,
     MergeStrategy,
     OverlayManager,
-    OverlayOperations,
 )
 from .repository import NamespacedKVStore, TypedKVRepository
 from .workspace import Workspace
@@ -55,9 +54,15 @@ from .view import SearchMatch, View, ViewQuery
 __version__ = "0.2.0"
 
 __all__ = [
-    # Core models
+    # Primary API
     "Fsdantic",
     "Workspace",
+    # Managers
+    "FileManager",
+    "KVManager",
+    "OverlayManager",
+    "MaterializationManager",
+    # Models
     "AgentFSOptions",
     "FileEntry",
     "FileStats",
@@ -67,31 +72,23 @@ __all__ = [
     "ToolCallStats",
     "ToolCallStatus",
     "VersionedKVRecord",
-    # View and search
+    # Advanced
     "View",
     "ViewQuery",
     "SearchMatch",
-    # Repository pattern
     "TypedKVRepository",
     "NamespacedKVStore",
-    # Materialization
-    "Materializer",
-    "MaterializationManager",
-    "MaterializationResult",
-    "FileChange",
-    "ConflictResolution",
-    # Overlay operations
-    "OverlayManager",
-    "OverlayOperations",
+    # Overlay
     "MergeStrategy",
     "MergeResult",
     "MergeConflict",
     "ConflictResolver",
-    # File operations
-    "FileManager",
-    "FileQuery",
-    "KVManager",
-    # Forward-architecture exceptions
+    # Materialization
+    "MaterializationResult",
+    "FileChange",
+    "ConflictResolution",
+    "Materializer",
+    # Exceptions
     "FsdanticError",
     "FileSystemError",
     "FileNotFoundError",
