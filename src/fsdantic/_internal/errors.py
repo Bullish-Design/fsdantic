@@ -35,9 +35,9 @@ def translate_agentfs_error(error: ErrnoException, context: str = "") -> Fsdanti
     """Translate AgentFS ``ErrnoException`` to fsdantic domain exception."""
 
     path = getattr(error, "path", None)
-    base_message = getattr(error, "message", str(error))
+    base_message = getattr(error, "message", None) or str(error)
     message = f"{context}: {base_message}" if context else base_message
-    code = getattr(error, "code", "")
+    code = str(getattr(error, "code", "") or "")
 
     exception_class = ERRNO_EXCEPTION_MAP.get(code, FileSystemError)
     return exception_class(message, path=path, cause=error)
