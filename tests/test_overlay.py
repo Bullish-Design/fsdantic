@@ -198,17 +198,18 @@ class TestOverlayOperationsReset:
         await agent_fs.fs.write_file("/file1.txt", "content1")
         await agent_fs.fs.write_file("/file2.txt", "content2")
         await agent_fs.fs.write_file("/file3.txt", "content3")
+        await agent_fs.fs.write_file("/nested/file4.txt", "content4")
 
         ops = OverlayOperations()
 
         # Verify files exist
-        assert len(await ops.list_changes(agent_fs)) == 3
+        assert len(await ops.list_changes(agent_fs)) == 4
 
         # Reset
         removed = await ops.reset_overlay(agent_fs)
 
-        # Should have removed all
-        assert removed == 3
+        # Should have removed all top-level files and nested directory
+        assert removed == 4
         assert len(await ops.list_changes(agent_fs)) == 0
 
     async def test_reset_overlay_specific_paths(self, agent_fs):
@@ -216,17 +217,21 @@ class TestOverlayOperationsReset:
         await agent_fs.fs.write_file("/keep.txt", "keep")
         await agent_fs.fs.write_file("/remove1.txt", "remove")
         await agent_fs.fs.write_file("/remove2.txt", "remove")
+        await agent_fs.fs.write_file("/remove-dir/file3.txt", "remove")
 
         ops = OverlayOperations()
-        removed = await ops.reset_overlay(agent_fs, paths=["/remove1.txt", "/remove2.txt"])
+        removed = await ops.reset_overlay(
+            agent_fs, paths=["/remove1.txt", "/remove2.txt", "/remove-dir"]
+        )
 
-        assert removed == 2
+        assert removed == 3
 
         # /keep.txt should still exist
         changes = await ops.list_changes(agent_fs)
         assert "/keep.txt" in changes
         assert "/remove1.txt" not in changes
         assert "/remove2.txt" not in changes
+        assert "/remove-dir/file3.txt" not in changes
 
     async def test_reset_empty_overlay(self, agent_fs):
         """Should handle resetting empty overlay."""
@@ -237,11 +242,22 @@ class TestOverlayOperationsReset:
 
     async def test_reset_nonexistent_paths(self, agent_fs):
         """Should handle nonexistent paths gracefully."""
-        ops = OverlayOperations()
-        removed = await ops.reset_overlay(agent_fs, paths=["/nonexistent.txt"])
+        await agent_fs.fs.write_file("/exists.txt", "exists")
 
-        # Should complete without error
-        assert removed == 0
+        ops = OverlayOperations()
+        removed = await ops.reset_overlay(
+            agent_fs, paths=["/nonexistent.txt", "/exists.txt"]
+        )
+
+        # Should skip nonexistent path and remove existing path
+        assert removed == 1
+
+    async def test_reset_overlay_reports_errors(self, agent_fs):
+        """Should raise with details when paths fail to reset."""
+        ops = OverlayOperations()
+
+        with pytest.raises(RuntimeError, match="Failed to reset"):
+            await ops.reset_overlay(agent_fs, paths=["/"])
 
 
 @pytest.mark.asyncio
