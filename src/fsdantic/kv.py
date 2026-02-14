@@ -28,7 +28,32 @@ class KVManager:
             prefix: Namespace prefix automatically applied to keys.
         """
         self._agent_fs = agent_fs
-        self._prefix = prefix
+        self._prefix = self._compose_prefix("", prefix)
+
+    @staticmethod
+    def _compose_prefix(base: str, child: str) -> str:
+        """Compose and normalize namespace prefixes.
+
+        Canonical prefix rules:
+        - Empty segments are ignored.
+        - Prefix segments are separated by a single ":".
+        - Non-empty composed prefixes always end with ":".
+
+        Examples:
+            "app" + "user" -> "app:user:"
+            "app:" + "user:" -> "app:user:"
+            "" + "" -> ""
+        """
+
+        segments: list[str] = []
+        for part in (base, child):
+            if not part:
+                continue
+            normalized = part.strip(":")
+            if normalized:
+                segments.extend(segment for segment in normalized.split(":") if segment)
+
+        return ":".join(segments) + (":" if segments else "")
 
     @property
     def agent_fs(self) -> AgentFS:
@@ -40,7 +65,8 @@ class KVManager:
         """Return the effective namespace prefix for this manager."""
         return self._prefix
 
-    def _scoped(self, key: str) -> str:
+    def _qualify_key(self, key: str) -> str:
+        """Return the fully-qualified KV key for this manager namespace."""
         return f"{self._prefix}{key}"
 
     async def get(self, key: str) -> Any:
@@ -49,7 +75,7 @@ class KVManager:
         This is for direct, untyped KV access. For model validation and typed
         records, prefer `repository()`.
         """
-        return await self._agent_fs.kv.get(self._scoped(key))
+        return await self._agent_fs.kv.get(self._qualify_key(key))
 
     async def set(self, key: str, value: Any) -> None:
         """Set a value by key using simple KV semantics.
@@ -57,11 +83,11 @@ class KVManager:
         This stores raw KV values directly. For Pydantic models, prefer
         `repository().save(...)`.
         """
-        await self._agent_fs.kv.set(self._scoped(key), value)
+        await self._agent_fs.kv.set(self._qualify_key(key), value)
 
     async def delete(self, key: str) -> None:
         """Delete a value by key using simple KV semantics."""
-        await self._agent_fs.kv.delete(self._scoped(key))
+        await self._agent_fs.kv.delete(self._qualify_key(key))
 
     async def exists(self, key: str) -> bool:
         """Return whether a key exists using simple KV semantics."""
@@ -74,9 +100,20 @@ class KVManager:
             prefix: Optional additional prefix inside this manager's namespace.
 
         Returns:
-            Raw entries from AgentFS KV list API.
+            Entries with keys relative to this manager namespace.
+
+        Contract:
+            - Input `prefix` is interpreted as manager-relative.
+            - Returned `item["key"]` values are manager-relative.
+            - Underlying AgentFS calls always use fully-qualified keys.
         """
-        return await self._agent_fs.kv.list(prefix=self._scoped(prefix))
+        qualified_prefix = self._qualify_key(prefix)
+        items = await self._agent_fs.kv.list(prefix=qualified_prefix)
+        return [
+            {**item, "key": item["key"][len(self._prefix) :]}
+            for item in items
+            if item["key"].startswith(self._prefix)
+        ]
 
     def repository(self, prefix: str = "") -> TypedKVRepository:
         """Create a typed repository bridged to this manager namespace.
@@ -84,7 +121,10 @@ class KVManager:
         Use this when you want typed, model-validated records instead of raw
         simple KV values.
         """
-        return TypedKVRepository(self._agent_fs, prefix=self._scoped(prefix))
+        return TypedKVRepository(
+            self._agent_fs,
+            prefix=self._compose_prefix(self._prefix, prefix),
+        )
 
     def namespace(self, prefix: str) -> "KVManager":
         """Create a child KV manager scoped to a nested namespace prefix.
@@ -92,4 +132,7 @@ class KVManager:
         The returned manager supports both simple KV methods and typed
         repositories while applying the combined prefix.
         """
-        return KVManager(self._agent_fs, prefix=self._scoped(prefix))
+        return KVManager(
+            self._agent_fs,
+            prefix=self._compose_prefix(self._prefix, prefix),
+        )

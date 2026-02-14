@@ -47,7 +47,7 @@ async def test_simple_kv_operations_respect_prefix():
     assert await manager.exists("theme") is True
 
     entries = await manager.list()
-    assert entries == [{"key": "app:theme", "value": "dark"}]
+    assert entries == [{"key": "theme", "value": "dark"}]
 
     await manager.delete("theme")
     assert await manager.exists("theme") is False
@@ -79,3 +79,37 @@ async def test_repository_accepts_additional_prefix():
 
     await repo.save("theme", UserRecord(name="dark"))
     assert await manager.get("cfg:theme") == {"name": "dark"}
+
+
+@pytest.mark.asyncio
+async def test_namespace_prefix_composition_is_canonical_and_stackable():
+    manager = KVManager(FakeAgentFS(), prefix=":base::")
+    nested = manager.namespace("::users").namespace("prefs::")
+
+    assert manager.prefix == "base:"
+    assert nested.prefix == "base:users:prefs:"
+
+
+@pytest.mark.asyncio
+async def test_list_contract_uses_relative_input_and_output_keys():
+    manager = KVManager(FakeAgentFS(), prefix="app")
+
+    await manager.set("users:alice", {"name": "Alice"})
+    await manager.set("users:bob", {"name": "Bob"})
+
+    entries = await manager.list("users:")
+    assert entries == [
+        {"key": "users:alice", "value": {"name": "Alice"}},
+        {"key": "users:bob", "value": {"name": "Bob"}},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_repository_prefix_uses_same_composition_rules_as_manager():
+    manager = KVManager(FakeAgentFS(), prefix="base")
+    nested = manager.namespace("users:")
+
+    repo = nested.repository("prefs")
+    await repo.save("alice", UserRecord(name="Alice"))
+
+    assert await manager.get("users:prefs:alice") == {"name": "Alice"}
