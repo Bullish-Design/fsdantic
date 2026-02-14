@@ -2,9 +2,11 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Optional, Protocol
+from typing import Optional, Protocol
 
 from agentfs_sdk import AgentFS, ErrnoException
+
+from ._internal.errors import translate_agentfs_error
 
 
 class MergeStrategy(str, Enum):
@@ -116,12 +118,14 @@ class OverlayOperations:
         conflicts = []
         errors = []
 
+        context = f"OverlayOperations.merge(path={path!r})"
+
         try:
             source_root_stat = await source.fs.stat(path)
         except ErrnoException as e:
             if e.code == "ENOENT":
                 return MergeResult(files_merged=0, conflicts=conflicts, errors=errors)
-            errors.append((path, str(e)))
+            errors.append((path, str(translate_agentfs_error(e, context))))
             return MergeResult(files_merged=0, conflicts=conflicts, errors=errors)
         except Exception as e:
             errors.append((path, str(e)))
@@ -164,12 +168,14 @@ class OverlayOperations:
             conflicts: List to append conflicts to
             errors: List to append errors to
         """
+        context = f"OverlayOperations._merge_recursive(path={path!r})"
+
         try:
             entries = await source.fs.readdir(path)
         except ErrnoException as e:
             if e.code == "ENOENT":
                 return
-            errors.append((path, str(e)))
+            errors.append((path, str(translate_agentfs_error(e, context))))
             return
         except Exception as e:
             errors.append((path, str(e)))
@@ -189,7 +195,8 @@ class OverlayOperations:
                         await target.fs.stat(source_path)
                     except ErrnoException as e:
                         if e.code != "ENOENT":
-                            raise
+                            context = f"OverlayOperations._merge_recursive(path={source_path!r})"
+                            raise translate_agentfs_error(e, context) from e
                         # Directory doesn't exist, create it
                         # Note: AgentFS mkdir creates parent dirs automatically
                         await target.fs.mkdir(source_path.lstrip("/"))
@@ -237,7 +244,8 @@ class OverlayOperations:
                 target_exists = True
             except ErrnoException as e:
                 if e.code != "ENOENT":
-                    raise
+                    context = f"OverlayOperations._merge_file(path={source_path!r})"
+                    raise translate_agentfs_error(e, context) from e
 
             # Handle conflict
             if target_exists and source_content != target_content:
@@ -267,6 +275,9 @@ class OverlayOperations:
             target_path = source_path.lstrip("/")
             await target.fs.write_file(target_path, source_content)
             stats["files_merged"] += 1
+        except ErrnoException as e:
+            context = f"OverlayOperations._merge_file(path={source_path!r})"
+            errors.append((source_path, str(translate_agentfs_error(e, context))))
         except Exception as e:
             errors.append((source_path, str(e)))
 
@@ -304,13 +315,15 @@ class OverlayOperations:
                             files.append(full_path)
                     except ErrnoException as e:
                         if e.code != "ENOENT":
-                            raise
+                            context = f"OverlayOperations.list_changes(path={full_path!r})"
+                            raise translate_agentfs_error(e, context) from e
                         pass
             except ErrnoException as e:
                 if e.code == "ENOENT":
                     pass
                 else:
-                    raise
+                    context = f"OverlayOperations.list_changes(path={current_path!r})"
+                    raise translate_agentfs_error(e, context) from e
 
         await walk(path)
         return files
@@ -354,7 +367,8 @@ class OverlayOperations:
             except ErrnoException as e:
                 if e.code == "ENOENT":
                     continue
-                errors.append((path, str(e)))
+                context = f"OverlayOperations.reset_overlay(path={path!r})"
+                errors.append((path, str(translate_agentfs_error(e, context))))
             except Exception as e:
                 errors.append((path, str(e)))
 

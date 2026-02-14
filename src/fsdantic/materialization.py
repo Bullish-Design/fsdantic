@@ -8,6 +8,7 @@ from typing import Callable, Optional
 
 from agentfs_sdk import AgentFS, ErrnoException
 
+from ._internal.errors import translate_agentfs_error
 from .view import ViewQuery
 
 
@@ -213,7 +214,8 @@ class Materializer:
                 except ErrnoException as e:
                     # If files disappear during diff, skip only missing files
                     if e.code != "ENOENT":
-                        raise
+                        context = f"Materializer.diff(path={file_path!r})"
+                        raise translate_agentfs_error(e, context) from e
 
         return changes
 
@@ -240,12 +242,14 @@ class Materializer:
             errors: List to append errors to
             filters: Optional filters to apply
         """
+        context = f"Materializer._copy_recursive(src_path={src_path!r})"
+
         try:
             entries = await source_fs.fs.readdir(src_path)
         except ErrnoException as e:
             if e.code == "ENOENT":
                 return
-            errors.append((src_path, str(e)))
+            errors.append((src_path, str(translate_agentfs_error(e, context))))
             return
         except Exception as e:
             errors.append((src_path, str(e)))
@@ -304,6 +308,9 @@ class Materializer:
                     if self.progress_callback:
                         self.progress_callback(entry_path, stats["files_written"], -1)
 
+            except ErrnoException as e:
+                context = f"Materializer._copy_recursive(entry_path={entry_path!r})"
+                errors.append((entry_path, str(translate_agentfs_error(e, context))))
             except Exception as e:
                 errors.append((entry_path, str(e)))
 
@@ -336,12 +343,14 @@ class Materializer:
                         if e.code == "ENOENT":
                             pass
                         else:
-                            raise
+                            context = f"Materializer._list_all_files(path={entry_path!r})"
+                            raise translate_agentfs_error(e, context) from e
             except ErrnoException as e:
                 if e.code == "ENOENT":
                     pass
                 else:
-                    raise
+                    context = f"Materializer._list_all_files(path={current_path!r})"
+                    raise translate_agentfs_error(e, context) from e
 
         await walk(path)
         return files
