@@ -14,8 +14,6 @@ class RepositoryError(FsdanticError):
 
 
 class FileSystemError(FsdanticError):
-    """Base error for filesystem operations."""
-class FileSystemError(FsdanticError):
     """Base error for filesystem operations.
 
     Attributes:
@@ -69,9 +67,10 @@ class KVStoreError(FsdanticError):
 class KeyNotFoundError(KVStoreError):
     """Raised when a key does not exist in the KV store."""
 
-    def __init__(self, key: str) -> None:
+    def __init__(self, key: str, cause: Exception | None = None) -> None:
         super().__init__(f"Key not found: {key}")
         self.key = key
+        self.cause = cause
 
 
 class SerializationError(KVStoreError):
@@ -85,9 +84,15 @@ class OverlayError(FsdanticError):
 class MergeConflictError(OverlayError):
     """Raised when overlay merge conflicts are encountered."""
 
-    def __init__(self, message: str, conflicts: list[Any]) -> None:
+    def __init__(
+        self,
+        message: str,
+        conflicts: list[Any],
+        cause: Exception | None = None,
+    ) -> None:
         super().__init__(message)
         self.conflicts = conflicts
+        self.cause = cause
 
 
 class MaterializationError(FsdanticError):
