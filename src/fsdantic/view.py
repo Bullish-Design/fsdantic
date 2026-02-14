@@ -1,21 +1,17 @@
 """View interface for querying AgentFS filesystem."""
 
-import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from collections.abc import AsyncIterator
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
 from agentfs_sdk import AgentFS
-from pydantic import BaseModel, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, Field
 
-from ._internal.paths import normalize_glob_pattern, normalize_path
-from .models import FileEntry, FileStats
+from .files import FileManager, FileQuery
+from .models import FileEntry
 
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -42,137 +38,29 @@ class SearchMatch:
     match_end: Optional[int] = None
 
 
-class ViewQuery(BaseModel):
-    """Query specification for filesystem views.
+class ViewQuery(FileQuery):
+    """Backward-compatible query model with content-search fields."""
 
-    Examples:
-        >>> query = ViewQuery(
-        ...     path_pattern="*.py",
-        ...     recursive=True,
-        ...     include_content=True
-        ... )
-    """
-
-    path_pattern: str = Field(
-        default="*",
-        description="Glob pattern for matching file paths (e.g., '*.py', '/data/**/*.json')"
-    )
-    recursive: bool = Field(
-        default=True,
-        description="Whether to search recursively in subdirectories"
-    )
-    include_content: bool = Field(
-        default=False,
-        description="Whether to load file contents"
-    )
-    include_stats: bool = Field(
-        default=True,
-        description="Whether to include file statistics"
-    )
-    regex_pattern: Optional[str] = Field(
-        None,
-        description="Optional regex pattern for more complex matching"
-    )
-    max_size: Optional[int] = Field(
-        None,
-        ge=0,
-        description="Maximum file size in bytes (files larger than this are excluded)"
-    )
-    min_size: Optional[int] = Field(
-        None,
-        ge=0,
-        description="Minimum file size in bytes (files smaller than this are excluded)"
-    )
     content_pattern: Optional[str] = Field(
         None,
-        description="Simple string pattern to search for in file contents"
+        description="Simple string pattern to search for in file contents",
     )
     content_regex: Optional[str] = Field(
         None,
-        description="Regex pattern to search for in file contents"
+        description="Regex pattern to search for in file contents",
     )
     case_sensitive: bool = Field(
         default=True,
-        description="Whether content search is case-sensitive"
+        description="Whether content search is case-sensitive",
     )
     whole_word: bool = Field(
         default=False,
-        description="Match whole words only for content search"
+        description="Match whole words only for content search",
     )
     max_matches_per_file: Optional[int] = Field(
         None,
-        description="Limit matches per file (None = unlimited)"
+        description="Limit matches per file (None = unlimited)",
     )
-
-    _normalized_path_pattern: str = PrivateAttr(default="*")
-    _path_matcher: re.Pattern[str] = PrivateAttr(default_factory=lambda: re.compile(".*"))
-    _regex_matcher: Optional[re.Pattern[str]] = PrivateAttr(default=None)
-
-    @staticmethod
-    def _normalize_path_pattern(pattern: str) -> str:
-        """Normalize patterns so basename-only globs match across directories."""
-        normalized = normalize_glob_pattern(pattern)
-        if "/" not in normalized:
-            normalized = f"**/{normalized}"
-        if not normalized.startswith("/"):
-            normalized = f"/{normalized}"
-        return normalized
-
-    @staticmethod
-    def _compile_glob_pattern(pattern: str) -> re.Pattern[str]:
-        """Compile glob pattern to regex with explicit support for ** and path separators."""
-        pieces: list[str] = ["^"]
-        i = 0
-
-        while i < len(pattern):
-            # **/ matches zero or more directories
-            if pattern[i:i + 3] == "**/":
-                pieces.append("(?:.*/)?")
-                i += 3
-            elif pattern[i:i + 2] == "**":
-                pieces.append(".*")
-                i += 2
-            elif pattern[i] == "*":
-                pieces.append("[^/]*")
-                i += 1
-            elif pattern[i] == "?":
-                pieces.append("[^/]")
-                i += 1
-            else:
-                pieces.append(re.escape(pattern[i]))
-                i += 1
-
-        pieces.append("$")
-        return re.compile("".join(pieces))
-
-    @model_validator(mode="after")
-    def _validate_and_prepare_matchers(self) -> "ViewQuery":
-        if (
-            self.min_size is not None
-            and self.max_size is not None
-            and self.min_size > self.max_size
-        ):
-            raise ValueError("min_size must be less than or equal to max_size")
-
-        self._normalized_path_pattern = self._normalize_path_pattern(self.path_pattern)
-        self._path_matcher = self._compile_glob_pattern(self._normalized_path_pattern)
-
-        if self.regex_pattern:
-            self._regex_matcher = re.compile(self.regex_pattern)
-        else:
-            self._regex_matcher = None
-
-        return self
-
-    def matches_path(self, path: str) -> bool:
-        """Match a path against the prepared glob strategy."""
-        return bool(self._path_matcher.match(normalize_path(path)))
-
-    def matches_regex(self, path: str) -> bool:
-        """Match a path against optional regex filter."""
-        if self._regex_matcher is None:
-            return True
-        return bool(self._regex_matcher.search(normalize_path(path)))
 
 
 class View(BaseModel):
@@ -208,102 +96,9 @@ class View(BaseModel):
             >>> for file in files:
             ...     print(file.path)
         """
-        entries: list[FileEntry] = []
-        include_stats = self._needs_file_stats()
-        include_content = self.query.include_content
-
-        async for item_path, stats in self._traverse_files("/", include_stats=include_stats):
-            item_path = normalize_path(item_path)
-            if not self._matches_pattern(item_path):
-                continue
-            if not self.query.matches_regex(item_path):
-                continue
-            if not self._matches_size_filter(stats):
-                continue
-
-            content = None
-            if include_content:
-                try:
-                    content = await self.agent.fs.read_file(item_path)
-                except FileNotFoundError:
-                    logger.debug("Path disappeared before read: %s", item_path)
-                except Exception:
-                    logger.exception("Failed reading file content for %s", item_path)
-
-            entries.append(
-                FileEntry(
-                    path=item_path,
-                    stats=self._to_file_stats(stats) if self.query.include_stats and stats else None,
-                    content=content,
-                )
-            )
-
-        return entries
-
-    async def _traverse_files(
-        self, root: str, include_stats: bool
-    ) -> AsyncIterator[tuple[str, Any | None]]:
-        """Traverse filesystem and yield file paths with optional raw stats."""
-        from .files import FileManager
-
-        root = normalize_path(root)
         manager = FileManager(self.agent)
-        async for item_path, stats in manager.traverse_files(
-            root,
-            recursive=self.query.recursive,
-            include_stats=include_stats,
-        ):
-            yield item_path, stats
+        return await manager.query(self.query)
 
-    def _matches_pattern(self, path: str) -> bool:
-        """Check if a path matches the query pattern.
-
-        Args:
-            path: File path to check
-
-        Returns:
-            True if path matches the pattern
-        """
-        return self.query.matches_path(normalize_path(path))
-
-    def _needs_file_stats(self) -> bool:
-        """Whether file-level stat data is needed by query options."""
-        return (
-            self.query.include_stats
-            or self.query.min_size is not None
-            or self.query.max_size is not None
-        )
-
-    def _to_file_stats(self, raw_stats: Any) -> FileStats:
-        """Convert AgentFS stats object to FileStats model."""
-        return FileStats(
-            size=raw_stats.size,
-            mtime=raw_stats.mtime,
-            is_file=raw_stats.is_file(),
-            is_directory=raw_stats.is_directory(),
-        )
-
-    def _matches_size_filter(self, raw_stats: Any | None) -> bool:
-        """Check if a file's raw stats match size filters.
-
-        Args:
-            raw_stats: AgentFS stats object
-
-        Returns:
-            True if entry matches size constraints
-        """
-        if raw_stats is None:
-            return True
-
-        if self.query.min_size is not None:
-            if raw_stats.size < self.query.min_size:
-                return False
-
-        if self.query.max_size is not None:
-            if raw_stats.size > self.query.max_size:
-                return False
-
-        return True
 
     async def filter(
         self,
@@ -334,20 +129,8 @@ class View(BaseModel):
             >>> count = await view.count()
             >>> print(f"Found {count} matching files")
         """
-        count = 0
-        include_stats = self.query.min_size is not None or self.query.max_size is not None
-
-        async for item_path, stats in self._traverse_files("/", include_stats=include_stats):
-            item_path = normalize_path(item_path)
-            if not self._matches_pattern(item_path):
-                continue
-            if not self.query.matches_regex(item_path):
-                continue
-            if not self._matches_size_filter(stats):
-                continue
-            count += 1
-
-        return count
+        manager = FileManager(self.agent)
+        return await manager.count(self.query)
 
     def with_pattern(self, pattern: str) -> "View":
         """Create a new view with a different path pattern.
