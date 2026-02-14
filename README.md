@@ -1,526 +1,235 @@
 # Fsdantic
 
-A comprehensive Pydantic-based interface library for the [AgentFS SDK](https://docs.turso.tech/agentfs/python-sdk). Fsdantic provides type-safe models, high-level abstractions, and powerful utilities for working with AgentFS virtual filesystems.
+Fsdantic is a workspace-first, async Python library for building on top of the AgentFS SDK.
 
-## Features
+The primary API is:
 
-- 🎯 **Type-safe models** - Pydantic models for all core AgentFS objects
-- 🔍 **Query interface** - Powerful `View` system for querying filesystem with filters and content search
-- 📦 **Repository pattern** - Generic typed repositories for KV store operations
-- 💾 **Workspace materialization** - Convert virtual filesystems to disk with conflict resolution
-- 🔄 **Overlay operations** - High-level overlay merging and management
-- 📁 **File operations** - Simplified file I/O with automatic base layer fallthrough
-- 🔎 **Content search** - Regex and pattern-based file content searching
-- ✅ **Validation** - Automatic validation of options and data structures
-- 🚀 **Async-first** - Built on async/await for optimal performance
-- 📖 **Well documented** - Comprehensive documentation and examples
+- `Fsdantic.open(...)` → `Workspace`
+- `workspace.files` for filesystem workflows
+- `workspace.kv` for key/value workflows
+- `workspace.overlay` for merge/reset workflows
+- `workspace.materialize` for diff/preview/export workflows
+- `workspace.raw` for direct AgentFS escape hatches
 
 ## Installation
 
 ```bash
 uv add fsdantic
-```
-
-Or with pip:
-
-```bash
+# or
 pip install fsdantic
 ```
 
-## Quick Start
+## Quickstart (workspace lifecycle)
 
 ```python
 import asyncio
-from agentfs_sdk import AgentFS
-from fsdantic import AgentFSOptions, View, ViewQuery, FileManager
+from fsdantic import Fsdantic
 
-async def main():
-    # Create validated options
-    options = AgentFSOptions(id="my-agent")
 
-    async with await AgentFS.open(options.model_dump()) as agent:
-        # Simple file operations
-        ops = FileManager(agent)
-        await ops.write("hello.txt", "Hello, World!")
-        content = await ops.read("hello.txt")
+async def main() -> None:
+    async with await Fsdantic.open(id="my-agent") as workspace:
+        await workspace.files.write("/hello.txt", "Hello from fsdantic")
+        text = await workspace.files.read("/hello.txt")
+        print(text)
 
-        # Create a view to query the filesystem
-        view = View(
-            agent=agent,
-            query=ViewQuery(
-                path_pattern="*.py",
-                recursive=True,
-                include_content=True
-            )
-        )
-
-        # Load all matching Python files
-        python_files = await view.load()
-        for file in python_files:
-            print(f"{file.path}: {file.stats.size} bytes")
 
 asyncio.run(main())
 ```
 
-## Core Models
+Use `async with` so the workspace is always closed cleanly.
 
-### AgentFSOptions
+---
 
-Validated options for opening an AgentFS filesystem:
+## Core flows
 
-```python
-from fsdantic import AgentFSOptions
-
-# By agent ID
-options = AgentFSOptions(id="my-agent")
-
-# By custom path
-options = AgentFSOptions(path="./data/mydb.db")
-```
-
-### FileEntry
-
-Represents a file in the filesystem with optional stats and content:
+### 1) File operations
 
 ```python
-from fsdantic import FileEntry, FileStats
+from fsdantic import ViewQuery
 
-entry = FileEntry(
-    path="/notes/todo.txt",
-    stats=FileStats(
-        size=1024,
-        mtime=datetime.now(),
-        is_file=True,
-        is_directory=False
-    ),
-    content="Task 1\nTask 2"
-)
-```
+# write/read (text)
+await workspace.files.write("/docs/readme.txt", "hello")
+text = await workspace.files.read("/docs/readme.txt", mode="text")
 
-### ToolCall & ToolCallStats
+# write/read (binary)
+await workspace.files.write("/blob.bin", b"\x00\x01", mode="binary")
+data = await workspace.files.read("/blob.bin", mode="binary", encoding=None)
 
-Type-safe models for tracking tool/function calls:
+# write/read JSON
+await workspace.files.write("/config.json", {"debug": True}, mode="json")
+config_text = await workspace.files.read("/config.json")
 
-```python
-from fsdantic import ToolCall, ToolCallStats
+# existence + stat
+exists = await workspace.files.exists("/config.json")
+stats = await workspace.files.stat("/config.json")
+print(stats.size, stats.is_file)
 
-call = ToolCall(
-    id=1,
-    name="search",
-    parameters={"query": "Python"},
-    result={"results": ["result1", "result2"]},
-    status="success",
-    started_at=datetime.now(),
-    completed_at=datetime.now()
-)
+# list directory
+names = await workspace.files.list_dir("/docs", output="name")
+full_paths = await workspace.files.list_dir("/docs", output="full")
 
-stats = ToolCallStats(
-    name="search",
-    total_calls=100,
-    successful=95,
-    failed=5,
-    avg_duration_ms=123.45
-)
-```
+# quick glob search
+python_paths = await workspace.files.search("**/*.py")
 
-## View Query System
-
-The `View` class provides a powerful interface for querying the AgentFS filesystem.
-
-### Basic Queries
-
-```python
-from fsdantic import View, ViewQuery
-
-# Query all files recursively
-view = View(agent=agent, query=ViewQuery(path_pattern="*", recursive=True))
-all_files = await view.load()
-
-# Query specific file types
-md_view = View(
-    agent=agent,
-    query=ViewQuery(
-        path_pattern="*.md",
-        recursive=True,
-        include_content=True
-    )
-)
-markdown_files = await md_view.load()
-```
-
-### Size Filters
-
-```python
-# Files larger than 1KB
-large_files = View(
-    agent=agent,
-    query=ViewQuery(
-        path_pattern="*",
-        recursive=True,
-        min_size=1024
+# advanced query
+entries = await workspace.files.query(
+    ViewQuery(
+        path_pattern="**/*.md",
+        include_stats=True,
+        include_content=False,
+        min_size=10,
     )
 )
 
-# Files smaller than 100KB
-small_files = View(
-    agent=agent,
-    query=ViewQuery(
-        path_pattern="*",
-        recursive=True,
-        max_size=102400
-    )
-)
+# remove file or directory
+await workspace.files.remove("/docs/readme.txt")
+await workspace.files.remove("/docs", recursive=True)
 ```
 
-### Regex Patterns
-
-For more complex matching, use regex patterns:
+### 2) KV operations
 
 ```python
-# Match files in specific directory
-notes_view = View(
-    agent=agent,
-    query=ViewQuery(
-        path_pattern="*",
-        recursive=True,
-        regex_pattern=r"^/notes/"
-    )
-)
+from pydantic import BaseModel
+
+
+class User(BaseModel):
+    name: str
+    role: str
+
+
+# simple key/value
+await workspace.kv.set("app:theme", "dark")
+theme = await workspace.kv.get("app:theme")
+items = await workspace.kv.list(prefix="app:")
+await workspace.kv.delete("app:theme")
+
+# namespaced KV manager
+users_kv = workspace.kv.namespace("users")
+await users_kv.set("alice", {"name": "Alice", "role": "admin"})
+alice_raw = await users_kv.get("alice")
+
+# typed repository
+repo = workspace.kv.repository(prefix="users:", model_type=User)
+await repo.save("bob", User(name="Bob", role="dev"))
+bob = await repo.load("bob")
+all_users = await repo.list_all()
 ```
 
-### Fluent API
-
-Chain view modifications for cleaner code:
+### 3) Overlay operations
 
 ```python
-# Query JSON files with content
-json_files = await (
-    View(agent=agent)
-    .with_pattern("*.json")
-    .with_content(True)
-    .load()
-)
+from fsdantic import Fsdantic, MergeStrategy
 
-# Query without content (faster)
-file_list = await (
-    View(agent=agent)
-    .with_pattern("*.py")
-    .with_content(False)
-    .load()
-)
+async with await Fsdantic.open(id="source-agent") as source:
+    await source.files.write("/shared/file.txt", "source version")
+
+    async with await Fsdantic.open(id="target-agent") as target:
+        result = await target.overlay.merge(source, strategy=MergeStrategy.OVERWRITE)
+        print("merged", result.files_merged)
+
+        if result.conflicts:
+            print("conflicts:", [c.path for c in result.conflicts])
+
+        if result.errors:
+            print("errors:", result.errors)
+
+        changed_paths = await target.overlay.list_changes("/")
+        print("overlay paths", changed_paths)
+
+        removed_count = await target.overlay.reset(paths=["/shared/file.txt"])
+        print("reset paths", removed_count)
 ```
 
-### Custom Filters
-
-Use predicates for advanced filtering:
+### 4) Materialization (preview/diff/export)
 
 ```python
-# Files modified today
-from datetime import datetime
+from pathlib import Path
+from fsdantic import Fsdantic
 
-today = datetime.now().date()
-recent_files = await view.filter(
-    lambda f: f.stats and f.stats.mtime.date() == today
-)
+async with await Fsdantic.open(id="base-agent") as base:
+    await base.files.write("/a.txt", "base")
 
-# Large Python files
-large_py_files = await view.filter(
-    lambda f: f.path.endswith('.py') and f.stats and f.stats.size > 10000
-)
-```
+    async with await Fsdantic.open(id="overlay-agent") as overlay:
+        await overlay.files.write("/a.txt", "overlay")
+        await overlay.files.write("/b.txt", "new")
 
-### Efficient Counting
+        # preview and diff are equivalent in current API
+        preview = await overlay.materialize.preview(base)
+        diff = await overlay.materialize.diff(base)
+        print([change.path for change in diff])
 
-Count files without loading content:
-
-```python
-view = View(agent=agent, query=ViewQuery(path_pattern="*.py"))
-count = await view.count()
-print(f"Found {count} Python files")
-```
-
-## ViewQuery Options
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `path_pattern` | `str` | `"*"` | Glob pattern for matching file paths |
-| `recursive` | `bool` | `True` | Search recursively in subdirectories |
-| `include_content` | `bool` | `False` | Load file contents |
-| `include_stats` | `bool` | `True` | Include file statistics |
-| `regex_pattern` | `Optional[str]` | `None` | Additional regex pattern for matching |
-| `max_size` | `Optional[int]` | `None` | Maximum file size in bytes |
-| `min_size` | `Optional[int]` | `None` | Minimum file size in bytes |
-
-## Pattern Matching
-
-### Glob Patterns
-
-- `*` - Match any characters except `/`
-- `**` - Match any characters including `/` (recursive)
-- `?` - Match single character
-- `[abc]` - Match any character in brackets
-- `[!abc]` - Match any character not in brackets
-
-Examples:
-- `*.py` - All Python files in current directory
-- `**/*.py` - All Python files recursively
-- `/data/**/*.json` - All JSON files under /data
-- `test_*.py` - Files starting with "test_"
-- `[!_]*.py` - Python files not starting with underscore
-
-### Regex Patterns
-
-For more complex matching, combine with `regex_pattern`:
-
-```python
-view = View(
-    agent=agent,
-    query=ViewQuery(
-        path_pattern="*",
-        regex_pattern=r"^/src/.*\.(py|pyx)$"  # Python/Cython files in /src
-    )
-)
-```
-
-## Complete Example
-
-```python
-import asyncio
-from agentfs_sdk import AgentFS
-from fsdantic import AgentFSOptions, View, ViewQuery
-
-async def main():
-    # Create AgentFS with validated options
-    options = AgentFSOptions(id="my-agent")
-
-    async with await AgentFS.open(options.model_dump()) as agent:
-        # Create some sample files
-        await agent.fs.write_file("/notes/todo.txt", "Task 1\nTask 2")
-        await agent.fs.write_file("/notes/ideas.md", "# Ideas\n\n- Idea 1")
-        await agent.fs.write_file("/config/settings.json", '{"theme": "dark"}')
-
-        # Query all markdown files with content
-        md_view = View(
-            agent=agent,
-            query=ViewQuery(
-                path_pattern="*.md",
-                recursive=True,
-                include_content=True
-            )
+        result = await overlay.materialize.to_disk(
+            Path("./materialized"),
+            base=base,
+            clean=True,
         )
 
-        md_files = await md_view.load()
-
-        for file in md_files:
-            print(f"File: {file.path}")
-            print(f"Size: {file.stats.size} bytes")
-            print(f"Content: {file.content[:100]}...")
-            print()
-
-if __name__ == "__main__":
-    asyncio.run(main())
+        print(result.files_written, result.bytes_written)
+        if result.errors:
+            print("materialization errors", result.errors)
 ```
 
-## New in Version 0.3.0
+---
 
-Fsdantic 0.3.0 introduces a curated public import surface (breaking for undocumented imports) and retains the powerful abstractions introduced in prior releases:
+## Error handling patterns
 
-### Repository Pattern
-
-Use `workspace.kv` for simple raw KV workflows, and `workspace.kv.repository(...)`
-for typed model workflows powered by `TypedKVRepository`:
+Catch fsdantic exceptions at API boundaries, recover where sensible, and re-raise when the caller should decide.
 
 ```python
-from fsdantic import KVRecord
-
-class UserRecord(KVRecord):  # Auto-includes created_at, updated_at
-    user_id: str
-    name: str
-    email: str
-
-# Simple path: raw KV access
-await workspace.kv.set("theme", "dark")
-theme = await workspace.kv.get("theme")
-
-# Typed path: repository engine with model validation
-users = workspace.kv.repository(prefix="user:", model_type=UserRecord)
-await users.save("alice", UserRecord(user_id="alice", name="Alice", email="alice@example.com"))
-user = await users.load("alice")  # Returns Optional[UserRecord]
-all_users = await users.list_all()  # Returns list[UserRecord]
-```
-
-### Content Search
-
-Search file contents with regex or simple patterns:
-
-```python
-from fsdantic import View, ViewQuery
-
-# Search for all class definitions in Python files
-view = View(
-    agent=agent_fs,
-    query=ViewQuery(
-        path_pattern="**/*.py",
-        content_regex=r"class\s+(\w+):",
-        include_content=True
-    )
+from fsdantic import (
+    DirectoryNotEmptyError,
+    FileNotFoundError,
+    InvalidPathError,
+    KeyNotFoundError,
+    KVStoreError,
+    MergeStrategy,
+    SerializationError,
 )
 
-matches = await view.search_content()
-for match in matches:
-    print(f"{match.file}:{match.line}: {match.text}")
+# Not found + invalid path
+try:
+    content = await workspace.files.read("/missing.txt")
+except FileNotFoundError:
+    content = ""  # recover with default
+except InvalidPathError:
+    raise  # caller provided invalid input; propagate
 
-# Find files containing "TODO"
-files_with_todos = await view.files_containing("TODO")
+# Directory removal policy
+try:
+    await workspace.files.remove("/tmp", recursive=False)
+except DirectoryNotEmptyError:
+    await workspace.files.remove("/tmp", recursive=True)
+
+# KV missing key
+try:
+    value = await workspace.kv.get("settings:timezone")
+except KeyNotFoundError:
+    value = "UTC"
+except SerializationError:
+    raise  # stored data is malformed for expected usage
+except KVStoreError:
+    raise  # infrastructure/storage failure
+
+# Merge conflict/error handling
+merge = await workspace.overlay.merge(other_workspace, strategy=MergeStrategy.ERROR)
+if merge.errors:
+    raise RuntimeError(f"merge failed: {merge.errors}")
 ```
 
-### Workspace Materialization
+---
 
-Convert virtual filesystems to disk:
+## Raw AgentFS access (escape hatch)
+
+Prefer managers first. Use `workspace.raw` only for low-level SDK features not exposed by fsdantic.
 
 ```python
-from fsdantic import Materializer, ConflictResolution
-from pathlib import Path
-
-materializer = Materializer(conflict_resolution=ConflictResolution.OVERWRITE)
-result = await materializer.materialize(
-    agent_fs=agent,
-    target_path=Path("./workspace"),
-    base_fs=stable,
-    clean=True
-)
-
-print(f"Materialized {result.files_written} files ({result.bytes_written} bytes)")
-if result.errors:
-    print(f"Errors: {len(result.errors)}")
+stat = await workspace.raw.fs.stat("/hello.txt")
+entries = await workspace.raw.kv.list(prefix="app:")
 ```
 
-### Overlay Operations
+## API summary
 
-Merge overlays and manage changes:
-
-```python
-from fsdantic import OverlayOperations, MergeStrategy
-
-ops = OverlayOperations(strategy=MergeStrategy.OVERWRITE)
-
-# Merge agent changes into stable
-result = await ops.merge(source=agent_fs, target=stable_fs)
-print(f"Merged {result.files_merged} files with {len(result.conflicts)} conflicts")
-
-# List changed files
-changes = await ops.list_changes(agent_fs)
-
-# Reset overlay to base state
-removed = await ops.reset_overlay(agent_fs)
-```
-
-### File Operations
-
-Simplified file operations with automatic fallthrough:
-
-```python
-from fsdantic import FileManager
-
-ops = FileManager(agent_fs, base_fs=stable_fs)
-
-# Read with explicit mode semantics (tries overlay, then base)
-content = await ops.read("config.json", mode="text")
-raw = await ops.read("image.png", mode="binary")
-
-# Write to overlay only (overwrites existing files)
-await ops.write("output.txt", "Hello World", mode="text")
-await ops.write("meta.json", {"theme": "dark"}, mode="json")
-
-# Parent directories are created automatically by AgentFS
-await ops.write("logs/2026/02/run.txt", "ok")
-
-# Search files
-python_files = await ops.search("**/*.py")
-
-# Get typed file stats (same FileStats model for overlay/base)
-stats = await ops.stat("config.json")
-print(stats.size, stats.is_file, stats.is_directory)
-
-# List directory entries (sorted deterministic order)
-names = await ops.list_dir("/src", output="name")
-full_paths = await ops.list_dir("/src", output="full")
-
-# Remove with explicit directory policy
-await ops.remove("/tmp.txt")
-await ops.remove("/build", recursive=True)
-
-# Get directory tree with stable schema
-# {"name", "path", "type", "children"}
-tree = await ops.tree("/src")
-```
-
-`FileManager` validates mode/type combinations and raises predictable exceptions:
-- `ValueError` for invalid/unknown encodings or incompatible `mode`/`encoding` pairs.
-- `TypeError` when `content` type does not match the selected write mode.
-
-### Query Builder Enhancements
-
-New convenience methods for common operations:
-
-```python
-from fsdantic import View, ViewQuery
-from datetime import timedelta
-
-view = View(agent=agent_fs, query=ViewQuery())
-
-# Files modified in the last hour
-recent = await view.recent_files(timedelta(hours=1))
-
-# Top 10 largest files
-largest = await view.largest_files(10)
-
-# Total size of all Python files
-total_size = await view.with_pattern("**/*.py").total_size()
-
-# Group files by extension
-grouped = await view.group_by_extension()
-print(f"Python files: {len(grouped.get('.py', []))}")
-```
-
-## Documentation
-
-- **[SPEC.md](SPEC.md)** - Technical specification and API reference
-- **[CONCEPT.md](CONCEPT.md)** - Conceptual overview and design philosophy
-- **[AGENTS.md](AGENTS.md)** - Agent skills and development best practices
-- **[FSDANTIC_EXTENSION_PLAN.md](FSDANTIC_EXTENSION_PLAN.md)** - Detailed implementation plan
-
-## Development
-
-This project uses [uv](https://github.com/astral-sh/uv) for dependency management:
-
-```bash
-# Install dependencies
-uv sync
-
-# Run example
-uv run examples/basic_usage.py
-
-# Run tests (if available)
-uv run pytest
-```
-
-## Requirements
-
-- Python >= 3.11
-- pydantic >= 2.0.0
-- agentfs-sdk >= 0.1.0
-
-## License
-
-MIT License - see LICENSE file for details.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## Links
-
-- [AgentFS Documentation](https://docs.turso.tech/agentfs)
-- [AgentFS Python SDK](https://docs.turso.tech/agentfs/python-sdk)
-- [Pydantic Documentation](https://docs.pydantic.dev/)
+- Entry point: `Fsdantic.open(...)`
+- Workspace managers: `files`, `kv`, `overlay`, `materialize`
+- Typed models: `FileEntry`, `FileStats`, `KVRecord`, `VersionedKVRecord`, etc.
+- Advanced querying: `View`, `ViewQuery` (or `FileQuery` from `fsdantic.files`)

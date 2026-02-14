@@ -1,157 +1,109 @@
-"""Example usage of agentfs-pydantic library."""
+"""Workspace-first fsdantic usage walkthrough."""
 
 import asyncio
-from datetime import datetime
+from pathlib import Path
 
-from agentfs_sdk import AgentFS
-from fsdantic import AgentFSOptions, View, ViewQuery
+from pydantic import BaseModel
+
+from fsdantic import (
+    DirectoryNotEmptyError,
+    FileNotFoundError,
+    Fsdantic,
+    KeyNotFoundError,
+    MergeStrategy,
+    ViewQuery,
+)
 
 
-async def main():
-    """Demonstrate basic usage of agentfs-pydantic."""
+class UserProfile(BaseModel):
+    name: str
+    role: str
 
-    # Example 1: Create AgentFS with validated options
-    print("=" * 60)
-    print("Example 1: Creating AgentFS with Pydantic models")
-    print("=" * 60)
 
-    options = AgentFSOptions(id="demo-agent")
-    print(f"Created options: {options.model_dump_json(indent=2)}")
+async def main() -> None:
+    """Run the primary fsdantic workflows in README order."""
+    print("Opening workspaces...")
+    async with await Fsdantic.open(id="fsdantic-demo-base") as base:
+        async with await Fsdantic.open(id="fsdantic-demo-main") as workspace:
+            print("\n1) File operations")
+            await workspace.files.write("/docs/readme.txt", "hello workspace")
+            await workspace.files.write("/config.json", {"debug": True}, mode="json")
 
-    async with await AgentFS.open(options.model_dump()) as agent:
-        print("✓ Successfully opened AgentFS")
+            print("read:", await workspace.files.read("/docs/readme.txt"))
+            print("exists /config.json:", await workspace.files.exists("/config.json"))
+            print("stat /config.json size:", (await workspace.files.stat("/config.json")).size)
+            print("list /docs:", await workspace.files.list_dir("/docs", output="name"))
+            print("search **/*.txt:", await workspace.files.search("**/*.txt"))
 
-        # Example 2: Create some sample files
-        print("\n" + "=" * 60)
-        print("Example 2: Creating sample files")
-        print("=" * 60)
-
-        await agent.fs.write_file("/notes/todo.txt", "1. Write documentation\n2. Add tests")
-        await agent.fs.write_file("/notes/ideas.md", "# Ideas\n\n- Feature A\n- Feature B")
-        await agent.fs.write_file("/config/settings.json", '{"theme": "dark", "lang": "en"}')
-        await agent.fs.write_file("/data/results.csv", "id,value\n1,100\n2,200")
-
-        print("✓ Created 4 sample files")
-
-        # Example 3: Query all files
-        print("\n" + "=" * 60)
-        print("Example 3: Query all files")
-        print("=" * 60)
-
-        view = View(agent=agent, query=ViewQuery(path_pattern="*", recursive=True))
-        all_files = await view.load()
-
-        print(f"Found {len(all_files)} files:")
-        for file in all_files:
-            if file.stats:
-                print(f"  {file.path} ({file.stats.size} bytes)")
-
-        # Example 4: Query only markdown files
-        print("\n" + "=" * 60)
-        print("Example 4: Query only markdown files")
-        print("=" * 60)
-
-        md_view = View(
-            agent=agent,
-            query=ViewQuery(
-                path_pattern="*.md",
-                recursive=True,
-                include_content=True
+            queried = await workspace.files.query(
+                ViewQuery(path_pattern="**/*.txt", include_stats=True, include_content=False)
             )
-        )
-        md_files = await md_view.load()
+            print("query matches:", [entry.path for entry in queried])
 
-        print(f"Found {len(md_files)} markdown files:")
-        for file in md_files:
-            print(f"\n  Path: {file.path}")
-            if file.content:
-                print(f"  Content preview: {file.content[:50]}...")
+            print("\n2) KV operations")
+            await workspace.kv.set("app:theme", "dark")
+            print("kv get app:theme:", await workspace.kv.get("app:theme"))
+            print("kv list app:", await workspace.kv.list(prefix="app:"))
 
-        # Example 5: Query with size filter
-        print("\n" + "=" * 60)
-        print("Example 5: Query files larger than 30 bytes")
-        print("=" * 60)
+            repo = workspace.kv.repository(prefix="users:", model_type=UserProfile)
+            await repo.save("alice", UserProfile(name="Alice", role="admin"))
+            print("typed load alice:", await repo.load("alice"))
+            print("typed list_all:", await repo.list_all())
 
-        large_files_view = View(
-            agent=agent,
-            query=ViewQuery(
-                path_pattern="*",
-                recursive=True,
-                min_size=30
+            print("\n3) Overlay operations")
+            await base.files.write("/shared/file.txt", "base value")
+            await workspace.files.write("/shared/file.txt", "overlay value")
+
+            merge_result = await workspace.overlay.merge(base, strategy=MergeStrategy.PRESERVE)
+            print(
+                "merge result:",
+                {
+                    "files_merged": merge_result.files_merged,
+                    "conflicts": len(merge_result.conflicts),
+                    "errors": len(merge_result.errors),
+                },
             )
-        )
-        large_files = await large_files_view.load()
+            print("overlay changes:", await workspace.overlay.list_changes("/"))
 
-        print(f"Found {len(large_files)} files larger than 30 bytes:")
-        for file in large_files:
-            if file.stats:
-                print(f"  {file.path} ({file.stats.size} bytes)")
+            print("\n4) Materialization")
+            preview = await workspace.materialize.preview(base)
+            diff = await workspace.materialize.diff(base)
+            print("preview paths:", [c.path for c in preview])
+            print("diff paths:", [c.path for c in diff])
 
-        # Example 6: Query with regex pattern
-        print("\n" + "=" * 60)
-        print("Example 6: Query files in /notes directory (regex)")
-        print("=" * 60)
-
-        notes_view = View(
-            agent=agent,
-            query=ViewQuery(
-                path_pattern="*",
-                recursive=True,
-                regex_pattern=r"^/notes/"
+            out_dir = Path(".tmp/materialized-example")
+            result = await workspace.materialize.to_disk(out_dir, base=base, clean=True)
+            print(
+                "to_disk:",
+                {
+                    "target": str(result.target_path),
+                    "files_written": result.files_written,
+                    "bytes_written": result.bytes_written,
+                    "errors": len(result.errors),
+                },
             )
-        )
-        notes_files = await notes_view.load()
 
-        print(f"Found {len(notes_files)} files in /notes:")
-        for file in notes_files:
-            print(f"  {file.path}")
+            print("\n5) Error handling patterns")
+            try:
+                await workspace.files.read("/does-not-exist.txt")
+            except FileNotFoundError:
+                print("recovered FileNotFoundError with fallback")
 
-        # Example 7: Count files without loading content
-        print("\n" + "=" * 60)
-        print("Example 7: Count files efficiently")
-        print("=" * 60)
+            try:
+                await workspace.kv.get("settings:timezone")
+            except KeyNotFoundError:
+                print("recovered KeyNotFoundError with default timezone")
 
-        count_view = View(agent=agent, query=ViewQuery(path_pattern="*", recursive=True))
-        total_count = await count_view.count()
-        print(f"Total files: {total_count}")
+            await workspace.files.write("/tmp/keep.txt", "x")
+            try:
+                await workspace.files.remove("/tmp", recursive=False)
+            except DirectoryNotEmptyError:
+                await workspace.files.remove("/tmp", recursive=True)
+                print("handled DirectoryNotEmptyError via recursive remove")
 
-        # Example 8: Use fluent API to chain view modifications
-        print("\n" + "=" * 60)
-        print("Example 8: Fluent API - Query JSON files with content")
-        print("=" * 60)
+            await workspace.kv.delete("app:theme")
 
-        json_files = await (
-            View(agent=agent)
-            .with_pattern("*.json")
-            .with_content(True)
-            .load()
-        )
-
-        print(f"Found {len(json_files)} JSON files:")
-        for file in json_files:
-            print(f"  {file.path}")
-            if file.content:
-                print(f"    Content: {file.content}")
-
-        # Example 9: Custom filter with predicate
-        print("\n" + "=" * 60)
-        print("Example 9: Custom filter - Files modified today")
-        print("=" * 60)
-
-        today = datetime.now().date()
-        recent_view = View(agent=agent, query=ViewQuery(path_pattern="*", recursive=True))
-        recent_files = await recent_view.filter(
-            lambda f: f.stats and f.stats.mtime.date() == today
-        )
-
-        print(f"Found {len(recent_files)} files modified today:")
-        for file in recent_files:
-            if file.stats:
-                print(f"  {file.path} (modified: {file.stats.mtime})")
-
-        print("\n" + "=" * 60)
-        print("All examples completed successfully!")
-        print("=" * 60)
+    print("\nDone.")
 
 
 if __name__ == "__main__":
