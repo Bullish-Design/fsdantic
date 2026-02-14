@@ -10,7 +10,7 @@ from fsdantic._internal.errors import (
     handle_agentfs_errors,
     translate_agentfs_error,
 )
-from fsdantic.exceptions import (
+from fsdantic import (
     DirectoryNotEmptyError,
     FileExistsError,
     FileNotFoundError,
@@ -147,14 +147,14 @@ def test_decorator_non_errno_passthrough_preserves_cause_chain():
 
 
 def test_key_structured_field():
-    from fsdantic.exceptions import KeyNotFoundError
+    from fsdantic import KeyNotFoundError
 
     exc = KeyNotFoundError("config:missing")
     assert exc.key == "config:missing"
 
 
 def test_conflict_structured_field():
-    from fsdantic.exceptions import MergeConflictError
+    from fsdantic import MergeConflictError
 
     conflicts = [{"path": "/a.txt"}]
     exc = MergeConflictError("merge failed", conflicts=conflicts)

@@ -80,7 +80,7 @@ __all__ = [
     "ConflictResolver",
     # File operations
     "FileOperations",
-    # Exceptions
+    # Forward-architecture exceptions
     "FsdanticError",
     "FileSystemError",
     "FileNotFoundError",
