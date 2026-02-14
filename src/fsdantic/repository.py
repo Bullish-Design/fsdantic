@@ -5,6 +5,8 @@ from typing import Callable, Generic, Optional, Type, TypeVar
 from agentfs_sdk import AgentFS
 from pydantic import BaseModel
 
+from .kv import KVManager
+
 T = TypeVar("T", bound=BaseModel)
 
 
@@ -42,6 +44,7 @@ class TypedKVRepository(Generic[T]):
         self.storage = storage
         self.prefix = prefix
         self.key_builder = key_builder or (lambda id: f"{prefix}{id}")
+        self._manager = KVManager(storage)
 
     async def save(self, id: str, record: T) -> None:
         """Save a record to KV store.
@@ -55,7 +58,7 @@ class TypedKVRepository(Generic[T]):
         """
         key = self.key_builder(id)
         # AgentFS KV store accepts dicts, not JSON strings
-        await self.storage.kv.set(key, record.model_dump())
+        await self._manager.set(key, record.model_dump())
 
     async def load(self, id: str, model_type: Type[T]) -> Optional[T]:
         """Load a record from KV store.
@@ -73,7 +76,7 @@ class TypedKVRepository(Generic[T]):
             ...     print(user.name)
         """
         key = self.key_builder(id)
-        data = await self.storage.kv.get(key)
+        data = await self._manager.get(key, default=None)
         if data is None:
             return None
         # AgentFS KV store returns dict, not JSON string
@@ -89,7 +92,7 @@ class TypedKVRepository(Generic[T]):
             >>> await repo.delete("user1")
         """
         key = self.key_builder(id)
-        await self.storage.kv.delete(key)
+        await self._manager.delete(key)
 
     async def list_all(self, model_type: Type[T]) -> list[T]:
         """List all records with the configured prefix.
@@ -106,7 +109,7 @@ class TypedKVRepository(Generic[T]):
             ...     print(user.name)
         """
         # AgentFS KV store list() returns list of dicts with 'key' and 'value'
-        items = await self.storage.kv.list(self.prefix)
+        items = await self._manager.list(self.prefix)
         records: list[T] = []
 
         for item in items:
@@ -134,8 +137,7 @@ class TypedKVRepository(Generic[T]):
             ...     print("User exists")
         """
         key = self.key_builder(id)
-        data = await self.storage.kv.get(key)
-        return data is not None
+        return await self._manager.exists(key)
 
     async def list_ids(self) -> list[str]:
         """List all IDs with the configured prefix.
@@ -147,7 +149,7 @@ class TypedKVRepository(Generic[T]):
             >>> ids = await repo.list_ids()
             >>> print(f"Found {len(ids)} records")
         """
-        items = await self.storage.kv.list(self.prefix)
+        items = await self._manager.list(self.prefix)
         ids = []
 
         for item in items:
