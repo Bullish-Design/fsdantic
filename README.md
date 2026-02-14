@@ -232,4 +232,4 @@ entries = await workspace.raw.kv.list(prefix="app:")
 - Entry point: `Fsdantic.open(...)`
 - Workspace managers: `files`, `kv`, `overlay`, `materialize`
 - Typed models: `FileEntry`, `FileStats`, `KVRecord`, `VersionedKVRecord`, etc.
-- Advanced querying: `View`, `ViewQuery` (or `FileQuery` from `fsdantic.files`)
+- Advanced querying: `View`, `ViewQuery`, `FileQuery` (all available via `from fsdantic import ...`)
