@@ -31,7 +31,9 @@ class FileOperations:
         self.agent_fs = agent_fs
         self.base_fs = base_fs
 
-    async def read_file(self, path: str, *, encoding: str = "utf-8") -> str | bytes:
+    async def read_file(
+        self, path: str, *, encoding: Optional[str] = "utf-8"
+    ) -> str | bytes:
         """Read file from overlay with fallthrough to base.
 
         Args:
@@ -50,18 +52,15 @@ class FileOperations:
         """
         # Try overlay first
         try:
-            content = await self.agent_fs.fs.read_file(path)
+            content = await self.agent_fs.fs.read_file(path, encoding=encoding)
         except ErrnoException as e:
             if e.code != "ENOENT":
                 raise
             # Fallthrough to base
             if self.base_fs is None:
                 raise
-            content = await self.base_fs.fs.read_file(path)
+            content = await self.base_fs.fs.read_file(path, encoding=encoding)
 
-        # Decode if encoding specified
-        if encoding:
-            return content.decode(encoding)
         return content
 
     async def write_file(
