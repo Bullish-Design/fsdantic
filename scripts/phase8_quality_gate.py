@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import fnmatch
 import os
 import platform
 import shutil
@@ -12,7 +13,6 @@ import socket
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 import xml.etree.ElementTree as ET
 
 
@@ -36,6 +36,34 @@ class StageResult:
     @property
     def passed(self) -> bool:
         return self.returncode == 0
+
+
+@dataclass(frozen=True)
+class CoverageStat:
+    lines_covered: int = 0
+    lines_total: int = 0
+    branches_covered: int = 0
+    branches_total: int = 0
+
+    @property
+    def line_rate(self) -> float:
+        if self.lines_total == 0:
+            return 100.0
+        return (self.lines_covered / self.lines_total) * 100
+
+    @property
+    def branch_rate(self) -> float:
+        if self.branches_total == 0:
+            return 100.0
+        return (self.branches_covered / self.branches_total) * 100
+
+    def add(self, other: "CoverageStat") -> "CoverageStat":
+        return CoverageStat(
+            lines_covered=self.lines_covered + other.lines_covered,
+            lines_total=self.lines_total + other.lines_total,
+            branches_covered=self.branches_covered + other.branches_covered,
+            branches_total=self.branches_total + other.branches_total,
+        )
 
 
 STAGES: list[Stage] = [
@@ -159,44 +187,89 @@ def copy_coverage_artifacts(repo_root: Path, artifacts_dir: Path) -> tuple[Path 
     return xml_out, html_out
 
 
-def parse_coverage(xml_path: Path) -> tuple[dict[str, tuple[float, float]], float, float]:
+def parse_coverage(xml_path: Path) -> tuple[dict[str, CoverageStat], CoverageStat]:
     tree = ET.parse(xml_path)
     root = tree.getroot()
 
-    overall_line = float(root.attrib.get("line-rate", "0")) * 100
-    overall_branch = float(root.attrib.get("branch-rate", "0")) * 100
-
-    per_file: dict[str, tuple[float, float]] = {}
+    per_file: dict[str, CoverageStat] = {}
     for cls in root.findall(".//class"):
         filename = cls.attrib.get("filename")
         if not filename:
             continue
-        line_rate = float(cls.attrib.get("line-rate", "0")) * 100
-        branch_rate = float(cls.attrib.get("branch-rate", "0")) * 100
+
+        lines_total = int(cls.attrib.get("lines-valid", "0") or 0)
+        lines_covered = int(cls.attrib.get("lines-covered", "0") or 0)
+
+        branches_total = 0
+        branches_covered = 0
+        for line in cls.findall("./lines/line"):
+            branch = line.attrib.get("branch", "false").lower() == "true"
+            if not branch:
+                continue
+            cond_cov = line.attrib.get("condition-coverage", "")
+            if "(" in cond_cov and "/" in cond_cov and ")" in cond_cov:
+                fragment = cond_cov.split("(", 1)[1].split(")", 1)[0]
+                covered_raw, total_raw = fragment.split("/", 1)
+                branches_covered += int(covered_raw.strip())
+                branches_total += int(total_raw.strip())
+
         normalized = filename.replace("\\", "/")
-        per_file[normalized] = (line_rate, branch_rate)
+        per_file[normalized] = CoverageStat(
+            lines_covered=lines_covered,
+            lines_total=lines_total,
+            branches_covered=branches_covered,
+            branches_total=branches_total,
+        )
 
-    return per_file, overall_line, overall_branch
+    overall = CoverageStat(
+        lines_covered=int(root.attrib.get("lines-covered", "0") or 0),
+        lines_total=int(root.attrib.get("lines-valid", "0") or 0),
+        branches_covered=int(root.attrib.get("branches-covered", "0") or 0),
+        branches_total=int(root.attrib.get("branches-valid", "0") or 0),
+    )
+    return per_file, overall
 
 
-def resolve_file_coverage(per_file: dict[str, tuple[float, float]], target: str) -> tuple[float, float] | None:
-    normalized_target = target.replace("\\", "/")
-    if normalized_target in per_file:
-        return per_file[normalized_target]
-
-    for key, value in per_file.items():
-        if key.endswith(normalized_target):
-            return value
-    return None
+def normalize_coverage_path(path: str) -> str:
+    return path.replace("\\", "/").lstrip("./")
 
 
-def average_coverage(values: Iterable[tuple[float, float]]) -> tuple[float, float]:
-    vals = list(values)
-    if not vals:
-        return (0.0, 0.0)
-    line = sum(v[0] for v in vals) / len(vals)
-    branch = sum(v[1] for v in vals) / len(vals)
-    return (line, branch)
+def compute_area_coverage(per_file: dict[str, CoverageStat], targets: tuple[str, ...], overall: CoverageStat) -> CoverageStat:
+    if targets == ("src/fsdantic/*",):
+        return overall
+
+    matched: set[str] = set()
+    for key in per_file:
+        normalized_key = normalize_coverage_path(key)
+        for target in targets:
+            normalized_target = normalize_coverage_path(target)
+            if fnmatch.fnmatch(normalized_key, normalized_target) or normalized_key.endswith(normalized_target):
+                matched.add(key)
+
+    aggregate = CoverageStat()
+    for key in matched:
+        aggregate = aggregate.add(per_file[key])
+    return aggregate
+
+
+def print_coverage_threshold_table(rows: list[tuple[str, str, float, float, float, float, str]]) -> None:
+    headers = ("Area", "Path", "Line", "Branch", "Threshold", "Status")
+    formatted_rows = [
+        (area, path, f"{line_val:.2f}%", f"{branch_val:.2f}%", f">= {line_floor:.1f}% / >= {branch_floor:.1f}%", status)
+        for area, path, line_val, branch_val, line_floor, branch_floor, status in rows
+    ]
+    widths = [len(h) for h in headers]
+    for row in formatted_rows:
+        widths = [max(width, len(cell)) for width, cell in zip(widths, row)]
+
+    def render(parts: tuple[str, ...]) -> str:
+        return " | ".join(cell.ljust(width) for cell, width in zip(parts, widths))
+
+    print("[phase8] Coverage thresholds")
+    print(render(headers))
+    print("-+-".join("-" * width for width in widths))
+    for row in formatted_rows:
+        print(render(row))
 
 
 def build_report(
@@ -216,31 +289,34 @@ def build_report(
     overall_line = 0.0
     overall_branch = 0.0
     coverage_rows: list[str] = []
+    coverage_table_rows: list[tuple[str, str, float, float, float, float, str]] = []
     coverage_fail = False
 
     if coverage_xml and coverage_xml.exists():
-        per_file, overall_line, overall_branch = parse_coverage(coverage_xml)
+        per_file, overall = parse_coverage(coverage_xml)
+        overall_line = overall.line_rate
+        overall_branch = overall.branch_rate
+
         for area, targets, line_floor, branch_floor in COVERAGE_THRESHOLDS:
-            if targets == ("src/fsdantic/*",):
-                line_val, branch_val = overall_line, overall_branch
-            else:
-                values: list[tuple[float, float]] = []
-                for target in targets:
-                    found = resolve_file_coverage(per_file, target)
-                    if found is not None:
-                        values.append(found)
-                line_val, branch_val = average_coverage(values)
+            aggregate = compute_area_coverage(per_file, targets, overall)
+            line_val, branch_val = aggregate.line_rate, aggregate.branch_rate
 
             pass_line = line_val >= line_floor
             pass_branch = branch_val >= branch_floor
             area_pass = pass_line and pass_branch
             coverage_fail = coverage_fail or (not area_pass)
+            status = "PASS" if area_pass else "FAIL"
+            path_text = ", ".join(targets)
+
+            coverage_table_rows.append((area, path_text, line_val, branch_val, line_floor, branch_floor, status))
 
             coverage_rows.append(
                 "| "
-                f"{area} | {', '.join(targets)} | {line_val:.2f}% | {branch_val:.2f}% | "
-                f">= {line_floor:.1f}% / >= {branch_floor:.1f}% | {'PASS' if area_pass else 'FAIL'} |"
+                f"{area} | {path_text} | {line_val:.2f}% | {branch_val:.2f}% | "
+                f">= {line_floor:.1f}% / >= {branch_floor:.1f}% | {status} |"
             )
+
+        print_coverage_threshold_table(coverage_table_rows)
     else:
         coverage_rows.append("| Coverage data unavailable | n/a | n/a | n/a | n/a | FAIL |")
         coverage_fail = True
