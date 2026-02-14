@@ -298,11 +298,31 @@ class OverlayOperations:
             paths = await self.list_changes(overlay)
 
         removed = 0
+        errors: list[tuple[str, str]] = []
         for path in paths:
+            normalized_path = path.lstrip("/")
             try:
-                await overlay.fs.remove(path.lstrip("/"))
+                stat = await overlay.fs.stat(path)
+
+                if stat.is_directory():
+                    await overlay.fs.rm(normalized_path, recursive=True)
+                else:
+                    await overlay.fs.unlink(normalized_path)
+
                 removed += 1
-            except Exception:
-                pass
+            except ErrnoException as e:
+                if e.code == "ENOENT":
+                    continue
+                errors.append((path, str(e)))
+            except Exception as e:
+                errors.append((path, str(e)))
+
+        if errors:
+            error_summary = "; ".join(
+                f"{error_path}: {error_message}" for error_path, error_message in errors
+            )
+            raise RuntimeError(
+                f"Failed to reset {len(errors)} overlay path(s): {error_summary}"
+            )
 
         return removed
