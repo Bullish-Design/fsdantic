@@ -47,8 +47,10 @@ class TestOverlayOperationsMerge:
 
         # /exclude should not exist
         stable_ops = FileOperations(stable_fs)
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(FileNotFoundError) as exc_info:
             await stable_ops.read_file("/exclude/file.txt")
+
+        assert exc_info.value.path == "/exclude/file.txt"
 
     async def test_merge_with_specific_file_path(self, agent_fs, stable_fs):
         """Should merge exactly one file when path points to a file."""
@@ -67,8 +69,10 @@ class TestOverlayOperationsMerge:
         assert await stable_fs.fs.read_file("/single-file") == "target content"
 
         stable_ops = FileOperations(stable_fs)
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(FileNotFoundError) as exc_info:
             await stable_ops.read_file("/other-file")
+
+        assert exc_info.value.path == "/other-file"
 
     async def test_merge_files_merged_count(self, agent_fs, stable_fs):
         """Should count merged files correctly."""
@@ -470,5 +474,7 @@ class TestOverlayOperationsIntegration:
         assert await stable_fs.fs.read_file("/keep.txt") == "keep"
 
         stable_ops = FileOperations(stable_fs)
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(FileNotFoundError) as exc_info:
             await stable_ops.read_file("/discard.txt")
+
+        assert exc_info.value.path == "/discard.txt"

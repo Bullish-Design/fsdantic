@@ -783,8 +783,11 @@ class TestErrorHandling:
 
             try:
                 ops = FileOperations(agent)
-                with pytest.raises(FileNotFoundError):
+                with pytest.raises(FileNotFoundError) as exc_info:
                     await ops.read_file("/nonexistent.txt")
+
+                assert exc_info.value.path == "/nonexistent.txt"
+                assert exc_info.value.cause is not None
 
             finally:
                 await agent._db.close()
