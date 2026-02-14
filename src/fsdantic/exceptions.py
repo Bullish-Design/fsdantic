@@ -2,75 +2,12 @@
 
 from __future__ import annotations
 
-from __future__ import annotations
-
 from typing import Any
 
 
 class FsdanticError(Exception):
     """Base exception for all fsdantic errors."""
 
-
-class FileSystemError(FsdanticError):
-    """Base exception for filesystem operation errors."""
-
-    def __init__(
-        self,
-        message: str,
-        path: str | None = None,
-        cause: Exception | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.path = path
-        self.cause = cause
-
-
-class FileNotFoundError(FileSystemError):
-    """File or directory not found."""
-
-
-class FileExistsError(FileSystemError):
-    """File or directory already exists."""
-
-
-class NotADirectoryError(FileSystemError):
-    """Expected directory, got file."""
-
-
-class IsADirectoryError(FileSystemError):
-    """Expected file, got directory."""
-
-
-class DirectoryNotEmptyError(FileSystemError):
-    """Cannot remove non-empty directory."""
-
-
-class PermissionError(FileSystemError):
-    """Operation not permitted."""
-
-
-class InvalidPathError(FileSystemError):
-    """Invalid path argument."""
-
-
-class KVStoreError(FsdanticError):
-    """Base for KV store errors."""
-
-
-class KeyNotFoundError(KVStoreError):
-    """Key not found in KV store."""
-
-    def __init__(self, key: str) -> None:
-        super().__init__(f"Key not found: {key}")
-        self.key = key
-
-
-class SerializationError(KVStoreError):
-    """Failed to serialize/deserialize value."""
-
-
-class OverlayError(FsdanticError):
-    """Base for overlay operation errors."""
 
 class FileSystemError(FsdanticError):
     """Base error for filesystem operations.
@@ -95,11 +32,6 @@ class FileNotFoundError(FileSystemError):
     """Raised when a requested file or directory does not exist."""
 
 
-
-class MergeConflictError(OverlayError):
-    """Error due to merge conflicts."""
-
-    def __init__(self, message: str, conflicts: list[Any]) -> None:
 class FileExistsError(FileSystemError):
     """Raised when a file or directory already exists."""
 
@@ -148,7 +80,7 @@ class OverlayError(FsdanticError):
 class MergeConflictError(OverlayError):
     """Raised when overlay merge conflicts are encountered."""
 
-    def __init__(self, message: str, conflicts: list) -> None:
+    def __init__(self, message: str, conflicts: list[Any]) -> None:
         super().__init__(message)
         self.conflicts = conflicts
 
@@ -156,9 +88,6 @@ class MergeConflictError(OverlayError):
 class MaterializationError(FsdanticError):
     """Raised when workspace materialization fails."""
 
-
-class ContentSearchError(FsdanticError):
-    """Error during content search operations."""
 
 class ValidationError(FsdanticError):
     """Raised when data validation fails."""
