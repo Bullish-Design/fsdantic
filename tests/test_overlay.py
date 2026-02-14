@@ -2,8 +2,7 @@
 
 import pytest
 
-from fsdantic import FileOperations, MergeStrategy, OverlayOperations
-from fsdantic.exceptions import FileNotFoundError
+from fsdantic import FileNotFoundError, FileOperations, MergeStrategy, OverlayOperations
 
 
 @pytest.mark.asyncio
