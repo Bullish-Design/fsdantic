@@ -18,6 +18,13 @@ from .models import FileEntry, FileStats
 logger = logging.getLogger(__name__)
 
 
+class _UnsetEncoding:
+    """Sentinel type for omitted encoding arguments."""
+
+
+_UNSET = _UnsetEncoding()
+
+
 class FileQuery(BaseModel):
     """Structured query contract for filesystem traversal and filtering."""
 
@@ -136,7 +143,7 @@ class FileManager:
         path: str,
         *,
         mode: Literal["text", "binary"] = "text",
-        encoding: Optional[str] = "utf-8",
+        encoding: str | None | _UnsetEncoding = _UNSET,
     ) -> str | bytes:
         """Read a file using explicit mode semantics.
 
@@ -150,14 +157,19 @@ class FileManager:
         resolved_encoding: Optional[str]
 
         if mode == "text":
+            if encoding is _UNSET:
+                encoding = "utf-8"
             if encoding is None:
                 raise ValueError("encoding must be provided when mode='text'")
             self._validate_encoding(encoding)
             resolved_encoding = encoding
         elif mode == "binary":
-            if encoding is not None:
+            if encoding is _UNSET:
+                resolved_encoding = None
+            elif encoding is None:
+                resolved_encoding = None
+            else:
                 raise ValueError("encoding must be None when mode='binary'")
-            resolved_encoding = None
         else:
             raise ValueError("mode must be 'text' or 'binary'")
 
