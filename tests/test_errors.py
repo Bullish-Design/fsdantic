@@ -63,6 +63,26 @@ def test_fsdantic_error_to_dict_and_safe_context():
     assert payload["context"]["nested"]["ok"] is True
 
 
+
+def test_fsdantic_error_to_dict_includes_cause_metadata():
+    cause = ValueError("invalid")
+    error = FsdanticError("failed", cause=cause)
+
+    payload = error.to_dict()
+
+    assert payload["cause"]["type"] == "ValueError"
+    assert payload["cause"]["message"] == "invalid"
+
+
+def test_fsdantic_error_str_includes_cause_and_context():
+    error = FsdanticError("failed", context={"path": "/tmp/x"}, cause=RuntimeError("boom"))
+
+    text = str(error)
+
+    assert "context={'path': '/tmp/x'}" in text
+    assert "cause=RuntimeError: boom" in text
+
+
 def test_per_errno_mapping_covers_every_required_code_once():
     """Every required errno key must be explicitly covered by the test matrix."""
     covered_codes = {

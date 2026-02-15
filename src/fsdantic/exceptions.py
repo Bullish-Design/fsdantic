@@ -45,14 +45,23 @@ class FsdanticError(Exception):
         }
         if self.context:
             payload["context"] = _safe_context_value(self.context)
+        if self.cause is not None:
+            payload["cause"] = {
+                "type": self.cause.__class__.__name__,
+                "message": str(self.cause),
+            }
         return payload
 
     def __str__(self) -> str:
         message = str(self.args[0]) if self.args else self.__class__.__name__
-        if not self.context:
+        details = []
+        if self.context:
+            details.append(f"context={_safe_context_value(self.context)}")
+        if self.cause is not None:
+            details.append(f"cause={self.cause.__class__.__name__}: {self.cause}")
+        if not details:
             return message
-        safe_context = _safe_context_value(self.context)
-        return f"{message} | context={safe_context}"
+        return f"{message} | {'; '.join(details)}"
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}({self.to_dict()!r})"

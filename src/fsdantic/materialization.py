@@ -169,7 +169,7 @@ class Materializer:
 
             if not errors:
                 self._swap_staging_to_target(staging_path=staging_path, target_path=target_path)
-        except Exception as e:
+        except (OSError, ValueError) as e:
             errors.append((str(target_path), str(e)))
         finally:
             self._safe_cleanup(staging_path, errors)
@@ -219,7 +219,7 @@ class Materializer:
             target_path.rename(backup_path)
             try:
                 staging_path.rename(target_path)
-            except Exception:
+            except OSError:
                 backup_path.rename(target_path)
                 raise
             self._safe_cleanup(backup_path, [])
