@@ -191,6 +191,19 @@ async with await Fsdantic.open(id="source-agent") as source:
 
 ### 4) Materialization (preview/diff/export)
 
+`clean=True` now uses a guarded staging workflow: files are materialized into a temporary sibling directory and only promoted to `target_path` after a successful run. This avoids partial output in the final target on failures.
+
+Safety semantics:
+- Rejects dangerous targets (for example filesystem roots).
+- Enforces an allow-root boundary (`allow_root`) so resolved targets cannot escape a trusted directory.
+- Uses rename/swap semantics when supported by the filesystem.
+- Falls back to non-atomic move on cross-device rename (`EXDEV`) and records cleanup issues in `MaterializationResult.errors`.
+
+Recovery behavior:
+- On failures before promotion, the previous target remains untouched.
+- Temporary staging paths are cleaned up best-effort; cleanup failures are surfaced in `result.errors`.
+
+
 ```python
 from pathlib import Path
 from fsdantic import Fsdantic
@@ -211,6 +224,7 @@ async with await Fsdantic.open(id="base-agent") as base:
             Path("./materialized"),
             base=base,
             clean=True,
+            allow_root=Path("./"),
         )
 
         print(result.files_written, result.bytes_written)

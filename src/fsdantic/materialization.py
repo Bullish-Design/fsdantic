@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import shutil
+import uuid
 from dataclasses import dataclass
 from enum import Enum
+from errno import EXDEV
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 
@@ -42,6 +44,14 @@ class FileChange:
     change_type: str  # "added", "modified", "deleted"
     old_size: Optional[int] = None
     new_size: Optional[int] = None
+
+
+@dataclass
+class FileFingerprint:
+    """Lightweight metadata snapshot for diff pre-checks."""
+
+    size: int
+    mtime_ns: Optional[int] = None
 
 
 @dataclass
@@ -85,15 +95,19 @@ class Materializer:
         self,
         conflict_resolution: ConflictResolution = ConflictResolution.OVERWRITE,
         progress_callback: Optional[Callable[[str, int, int], None]] = None,
+        allow_root: Optional[Path] = None,
     ):
         """Initialize materializer.
 
         Args:
             conflict_resolution: How to handle existing files
             progress_callback: Optional callback(path, current, total)
+            allow_root: Optional directory boundary that materialization targets
+                must be inside. If None, each target's parent is used.
         """
         self.conflict_resolution = conflict_resolution
         self.progress_callback = progress_callback
+        self.allow_root = allow_root
 
     async def materialize(
         self,
@@ -102,6 +116,7 @@ class Materializer:
         base_fs: Optional[AgentFS] = None,
         filters: Optional[ViewQuery] = None,
         clean: bool = True,
+        allow_root: Optional[Path] = None,
     ) -> MaterializationResult:
         """Materialize AgentFS contents to disk.
 
@@ -111,6 +126,7 @@ class Materializer:
             base_fs: Optional base layer to materialize first
             filters: Optional ViewQuery to filter files
             clean: If True, remove target_path contents first
+            allow_root: Optional directory boundary override for this run
 
         Returns:
             MaterializationResult with statistics
@@ -121,10 +137,11 @@ class Materializer:
             ...     target_path=Path("./output")
             ... )
         """
-        if clean and target_path.exists():
-            shutil.rmtree(target_path)
-
-        target_path.mkdir(parents=True, exist_ok=True)
+        target_path, _ = self._validate_target_path(
+            target_path=target_path,
+            allow_root=allow_root or self.allow_root,
+        )
+        staging_path = target_path.parent / f"{target_path.name}.tmp-{uuid.uuid4().hex}"
 
         stats = {
             "files_written": 0,
@@ -134,12 +151,28 @@ class Materializer:
         skipped = []
         errors = []
 
-        # Materialize base layer first if provided
-        if base_fs is not None:
-            await self._copy_recursive(base_fs, "/", target_path, stats, changes, skipped, errors)
+        try:
+            if staging_path.exists():
+                shutil.rmtree(staging_path)
+            staging_path.mkdir(parents=True, exist_ok=False)
 
-        # Materialize overlay layer
-        await self._copy_recursive(agent_fs, "/", target_path, stats, changes, skipped, errors, filters=filters)
+            # Preserve existing files in no-clean mode by seeding the staging tree.
+            if not clean and target_path.exists():
+                shutil.copytree(target_path, staging_path, dirs_exist_ok=True)
+
+            # Materialize base layer first if provided
+            if base_fs is not None:
+                await self._copy_recursive(base_fs, "/", staging_path, stats, changes, skipped, errors)
+
+            # Materialize overlay layer
+            await self._copy_recursive(agent_fs, "/", staging_path, stats, changes, skipped, errors, filters=filters)
+
+            if not errors:
+                self._swap_staging_to_target(staging_path=staging_path, target_path=target_path)
+        except Exception as e:
+            errors.append((str(target_path), str(e)))
+        finally:
+            self._safe_cleanup(staging_path, errors)
 
         return MaterializationResult(
             target_path=target_path,
@@ -149,6 +182,64 @@ class Materializer:
             skipped=skipped,
             errors=errors,
         )
+
+    def _validate_target_path(self, target_path: Path, allow_root: Optional[Path]) -> tuple[Path, Path]:
+        """Validate target path and allowed boundary for safe materialization."""
+        resolved_target = target_path.expanduser().resolve(strict=False)
+        boundary = (allow_root or resolved_target.parent).expanduser().resolve(strict=False)
+
+        if resolved_target == resolved_target.parent:
+            raise ValueError(f"Refusing to materialize to filesystem root: {resolved_target}")
+        if boundary == boundary.parent:
+            raise ValueError(f"Refusing to use filesystem root as allow_root boundary: {boundary}")
+        try:
+            resolved_target.relative_to(boundary)
+        except ValueError as e:
+            raise ValueError(
+                f"Target path {resolved_target} must be inside allow_root boundary {boundary}"
+            ) from e
+
+        return resolved_target, boundary
+
+    def _swap_staging_to_target(self, staging_path: Path, target_path: Path) -> None:
+        """Promote staged output to final target.
+
+        On the same filesystem, rename operations are atomic per operation. The
+        promotion uses rename-based swap first; if rename is unsupported (for
+        example cross-device `EXDEV`), it falls back to a non-atomic copy/move.
+        """
+        backup_path = target_path.parent / f"{target_path.name}.bak-{uuid.uuid4().hex}"
+        target_exists = target_path.exists()
+
+        if not target_exists:
+            staging_path.rename(target_path)
+            return
+
+        try:
+            target_path.rename(backup_path)
+            try:
+                staging_path.rename(target_path)
+            except Exception:
+                backup_path.rename(target_path)
+                raise
+            self._safe_cleanup(backup_path, [])
+        except OSError as e:
+            if e.errno != EXDEV:
+                raise
+            # Cross-device rename fallback: not atomic.
+            if target_path.exists():
+                shutil.rmtree(target_path)
+            shutil.move(str(staging_path), str(target_path))
+
+    def _safe_cleanup(self, path: Path, errors: list[tuple[str, str]]) -> None:
+        """Best-effort cleanup for staging/backup paths with error tracking."""
+        if not path.exists():
+            return
+
+        try:
+            shutil.rmtree(path)
+        except OSError as e:
+            errors.append((str(path), f"cleanup_failed: {e}"))
 
     async def diff(self, overlay_fs: AgentFS, base_fs: AgentFS, path: str = "/") -> list[FileChange]:
         """Compute changes between overlay and base.
@@ -179,47 +270,56 @@ class Materializer:
 
         # Added files
         for file_path in overlay_set - base_set:
-            changes.append(FileChange(path=file_path, change_type="added", new_size=overlay_files[file_path]))
+            changes.append(FileChange(path=file_path, change_type="added", new_size=overlay_files[file_path].size))
 
         # Modified files
         for file_path in overlay_set & base_set:
-            overlay_size = overlay_files[file_path]
-            base_size = base_files[file_path]
+            overlay_meta = overlay_files[file_path]
+            base_meta = base_files[file_path]
 
-            if overlay_size != base_size:
+            if overlay_meta.size != base_meta.size:
                 changes.append(
                     FileChange(
                         path=file_path,
                         change_type="modified",
-                        old_size=base_size,
-                        new_size=overlay_size,
+                        old_size=base_meta.size,
+                        new_size=overlay_meta.size,
                     )
                 )
-            else:
-                # Size same: prefer hash-first comparison, then byte-accurate fallback.
-                try:
-                    overlay_hash = await hash_stream(overlay_manager.read_stream(file_path))
-                    base_hash = await hash_stream(base_manager.read_stream(file_path))
+                continue
 
-                    if overlay_hash != base_hash:
-                        is_equal = await compare_streams(
-                            overlay_manager.read_stream(file_path),
-                            base_manager.read_stream(file_path),
-                        )
-                        if not is_equal:
-                            changes.append(
-                                FileChange(
-                                    path=file_path,
-                                    change_type="modified",
-                                    old_size=base_size,
-                                    new_size=overlay_size,
-                                )
+            # Metadata pre-check avoids unnecessary stream reads for unchanged files.
+            if (
+                overlay_meta.mtime_ns is not None
+                and base_meta.mtime_ns is not None
+                and overlay_meta.mtime_ns == base_meta.mtime_ns
+            ):
+                continue
+
+            # Hash-first comparison, then byte-accurate fallback on mismatch.
+            try:
+                overlay_hash = await hash_stream(overlay_manager.read_stream(file_path))
+                base_hash = await hash_stream(base_manager.read_stream(file_path))
+
+                if overlay_hash != base_hash:
+                    is_equal = await compare_streams(
+                        overlay_manager.read_stream(file_path),
+                        base_manager.read_stream(file_path),
+                    )
+                    if not is_equal:
+                        changes.append(
+                            FileChange(
+                                path=file_path,
+                                change_type="modified",
+                                old_size=base_meta.size,
+                                new_size=overlay_meta.size,
                             )
-                except ErrnoException as e:
-                    # If files disappear during diff, skip only missing files
-                    if e.code != "ENOENT":
-                        context = f"Materializer.diff(path={file_path!r})"
-                        raise translate_agentfs_error(e, context) from e
+                        )
+            except ErrnoException as e:
+                # If files disappear during diff, skip only missing files
+                if e.code != "ENOENT":
+                    context = f"Materializer.diff(path={file_path!r})"
+                    raise translate_agentfs_error(e, context) from e
 
         return changes
 
@@ -316,15 +416,15 @@ class Materializer:
             except OSError as e:
                 errors.append((entry_path, str(e)))
 
-    async def _list_all_files(self, fs: AgentFS, path: str) -> dict[str, int]:
-        """Get all files with their sizes.
+    async def _list_all_files(self, fs: AgentFS, path: str) -> dict[str, FileFingerprint]:
+        """Get all files with lightweight metadata for diff checks.
 
         Args:
             fs: AgentFS filesystem
             path: Root path to start from
 
         Returns:
-            Dictionary mapping file paths to their sizes
+            Dictionary mapping file paths to metadata fingerprints
         """
         files = {}
 
@@ -340,7 +440,11 @@ class Materializer:
                         if stat.is_directory():
                             await walk(entry_path)
                         else:
-                            files[entry_path] = stat.size
+                            mtime_ns = getattr(stat, "mtime_ns", None)
+                            if mtime_ns is None:
+                                mtime = getattr(stat, "mtime", None)
+                                mtime_ns = int(mtime * 1_000_000_000) if isinstance(mtime, (int, float)) else None
+                            files[entry_path] = FileFingerprint(size=stat.size, mtime_ns=mtime_ns)
                     except ErrnoException as e:
                         if e.code == "ENOENT":
                             pass
@@ -378,6 +482,7 @@ class MaterializationManager:
         base: AgentFS | "Workspace" | None = None,
         filters: Optional[ViewQuery] = None,
         clean: bool = True,
+        allow_root: Optional[Path] = None,
     ) -> MaterializationResult:
         """Materialize this workspace to disk, optionally layering a base workspace."""
         base_fs = self._resolve_agentfs(base) if base is not None else None
@@ -387,6 +492,7 @@ class MaterializationManager:
             base_fs=base_fs,
             filters=filters,
             clean=clean,
+            allow_root=allow_root,
         )
 
     async def diff(
