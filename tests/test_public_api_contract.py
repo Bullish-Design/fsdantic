@@ -14,6 +14,8 @@ def test___all___exact_expected_exports() -> None:
         "Fsdantic",
         "Workspace",
         "AgentFSOptions",
+        "BatchItemResult",
+        "BatchResult",
         "FileEntry",
         "FileStats",
         "KVEntry",

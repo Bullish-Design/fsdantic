@@ -1,5 +1,7 @@
 """Tests for FileManager helper class."""
 
+import asyncio
+
 import pytest
 from agentfs_sdk import ErrnoException
 from fsdantic import (
@@ -208,6 +210,44 @@ class TestFileManager:
             "/alpha/beta/file.txt",
             "/alpha/beta/other.py",
         }
+
+
+    async def test_read_many_preserves_order_and_reports_partial_failures(self, agent_fs):
+        """read_many should preserve order and report per-item failures."""
+        ops = FileManager(agent_fs)
+        await ops.write("/present-a.txt", "a")
+        await ops.write("/present-b.txt", "b")
+
+        result = await ops.read_many(["/present-a.txt", "/missing.txt", "/present-b.txt"])
+
+        assert [item.index for item in result.items] == [0, 1, 2]
+        assert [item.key_or_path for item in result.items] == ["/present-a.txt", "/missing.txt", "/present-b.txt"]
+        assert [item.ok for item in result.items] == [True, False, True]
+        assert result.items[0].value == "a"
+        assert result.items[1].error is not None
+        assert result.items[2].value == "b"
+
+    async def test_write_many_enforces_concurrency_limit(self, agent_fs, monkeypatch):
+        """write_many should never exceed its concurrency limit."""
+        ops = FileManager(agent_fs)
+
+        active = 0
+        max_active = 0
+
+        async def tracked_write(path, content, *, mode=None, encoding="utf-8"):
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            await asyncio.sleep(0.02)
+            active -= 1
+
+        monkeypatch.setattr(ops, "write", tracked_write)
+
+        payload = [(f"/file-{i}.txt", f"value-{i}") for i in range(8)]
+        result = await ops.write_many(payload, concurrency_limit=3)
+
+        assert all(item.ok for item in result.items)
+        assert max_active <= 3
 
     async def test_tree_with_max_depth(self, agent_fs):
         """Should respect max_depth parameter."""

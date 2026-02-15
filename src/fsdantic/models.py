@@ -193,6 +193,28 @@ class KVEntry(BaseModel):
     value: Any = Field(description="Entry value (JSON-serializable)")
 
 
+class BatchItemResult(BaseModel):
+    """Outcome for a single item in a batch operation."""
+
+    index: int = Field(description="Original position in the caller input list")
+    key_or_path: str = Field(description="Input key/path/identifier for this result")
+    ok: bool = Field(description="True when the item operation succeeded")
+    value: Any = Field(default=None, description="Result value for successful items")
+    error: Optional[str] = Field(default=None, description="Error message for failed items")
+
+
+class BatchResult(BaseModel):
+    """Deterministic aggregate result for a batch operation.
+
+    ``items`` is always returned in the same order as the corresponding input list.
+    """
+
+    items: list[BatchItemResult] = Field(
+        default_factory=list,
+        description="Per-item outcomes preserving caller input order",
+    )
+
+
 class FileEntry(BaseModel):
     """Filesystem entry with path and optional metadata.
 

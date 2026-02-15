@@ -343,6 +343,36 @@ class TestRepositoryEdgeCases:
             assert loaded is not None
             assert loaded.name == "Test"
 
+
+    async def test_load_many_preserves_order_and_reports_mixed_outcomes(self, agent_fs):
+        """load_many should preserve order and report missing IDs as failures."""
+        repo = TypedKVRepository[UserRecord](agent_fs, prefix="user:", model_type=UserRecord)
+        await repo.save("alice", UserRecord(name="Alice", email="alice@example.com", age=30))
+
+        result = await repo.load_many(["alice", "missing"], default=...)
+
+        assert [item.index for item in result.items] == [0, 1]
+        assert [item.key_or_path for item in result.items] == ["alice", "missing"]
+        assert result.items[0].ok is True
+        assert result.items[0].value.name == "Alice"
+        assert result.items[1].ok is False
+        assert result.items[1].error is not None
+
+    async def test_save_many_and_delete_many(self, agent_fs):
+        """save_many/delete_many should return per-item outcomes."""
+        repo = TypedKVRepository[UserRecord](agent_fs, prefix="user:", model_type=UserRecord)
+
+        save_result = await repo.save_many([
+            ("u1", UserRecord(name="One", email="u1@example.com", age=20)),
+            ("u2", UserRecord(name="Two", email="u2@example.com", age=21)),
+        ])
+        assert [item.ok for item in save_result.items] == [True, True]
+
+        delete_result = await repo.delete_many(["u1", "missing"])
+        assert [item.ok for item in delete_result.items] == [True, True]
+        assert delete_result.items[0].value is True
+        assert delete_result.items[1].value is False
+
     async def test_large_number_of_records(self, agent_fs):
         """Should handle many records efficiently."""
         repo = TypedKVRepository[UserRecord](agent_fs, prefix="user:")

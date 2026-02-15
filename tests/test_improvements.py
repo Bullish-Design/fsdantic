@@ -1,5 +1,7 @@
 """Tests for library improvements (batch operations, exceptions, etc.)."""
 
+import asyncio
+
 import pytest
 from pydantic import BaseModel
 
@@ -8,6 +10,7 @@ from fsdantic import (
     FsdanticError,
     MaterializationError,
     MergeConflictError,
+    KVManager,
     KVStoreError,
     TypedKVRepository,
     ValidationError,
@@ -225,6 +228,28 @@ class TestErrorScenarios:
         # search_content requires content_pattern or content_regex
         with pytest.raises(ValueError):
             await view.search_content()
+
+
+    async def test_kv_set_many_respects_concurrency_limit(self, agent_fs, monkeypatch):
+        """KV set_many should enforce configured concurrency."""
+        manager = KVManager(agent_fs)
+
+        active = 0
+        max_active = 0
+
+        async def tracked_set(key, value):
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            await asyncio.sleep(0.02)
+            active -= 1
+
+        monkeypatch.setattr(manager, "set", tracked_set)
+
+        result = await manager.set_many([(f"k{i}", i) for i in range(7)], concurrency_limit=2)
+
+        assert all(item.ok for item in result.items)
+        assert max_active <= 2
 
     async def test_batch_operations_maintain_consistency(self, agent_fs):
         """Batch operations should maintain data consistency."""

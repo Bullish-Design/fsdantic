@@ -32,6 +32,8 @@ from .materialization import (
 )
 from .models import (
     AgentFSOptions,
+    BatchItemResult,
+    BatchResult,
     FileEntry,
     FileStats,
     KVEntry,
@@ -68,6 +70,8 @@ __all__ = [
     "MaterializationManager",
     # Models
     "AgentFSOptions",
+    "BatchItemResult",
+    "BatchResult",
     "FileEntry",
     "FileStats",
     "KVEntry",

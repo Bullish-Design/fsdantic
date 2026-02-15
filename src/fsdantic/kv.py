@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
@@ -9,6 +10,7 @@ from pydantic import BaseModel
 from agentfs_sdk import AgentFS
 
 from .exceptions import KVStoreError, KeyNotFoundError, SerializationError
+from .models import BatchItemResult, BatchResult
 
 if TYPE_CHECKING:
     from .repository import TypedKVRepository
@@ -165,6 +167,104 @@ class KVManager:
                 f"(prefix='{self._prefix}')"
             ) from exc
         return True
+
+
+    async def get_many(self, keys: list[str], *, default: Any = _MISSING) -> BatchResult:
+        """Get many keys with deterministic ordering and per-item outcomes.
+
+        The returned ``BatchResult.items`` order always matches ``keys``.
+        Missing keys produce failures when ``default`` is omitted and successes
+        with ``value=default`` when ``default`` is provided.
+        """
+        if not keys:
+            return BatchResult()
+
+        async def _get_one(index: int, key: str) -> BatchItemResult:
+            try:
+                value = await self.get(key, default=default)
+                return BatchItemResult(index=index, key_or_path=key, ok=True, value=value)
+            except Exception as exc:  # pragma: no cover - defensive fallback
+                return BatchItemResult(index=index, key_or_path=key, ok=False, error=str(exc))
+
+        gathered = await asyncio.gather(
+            *(_get_one(index, key) for index, key in enumerate(keys)),
+            return_exceptions=True,
+        )
+
+        items: list[BatchItemResult] = []
+        for index, raw_result in enumerate(gathered):
+            if isinstance(raw_result, BatchItemResult):
+                items.append(raw_result)
+            else:
+                items.append(BatchItemResult(index=index, key_or_path=keys[index], ok=False, error=str(raw_result)))
+        return BatchResult(items=items)
+
+    async def set_many(
+        self,
+        items: list[tuple[str, Any]],
+        *,
+        concurrency_limit: int = 10,
+    ) -> BatchResult:
+        """Set many keys with bounded concurrency and per-item outcomes."""
+        if concurrency_limit <= 0:
+            raise ValueError("concurrency_limit must be greater than 0")
+        if not items:
+            return BatchResult()
+
+        semaphore = asyncio.Semaphore(concurrency_limit)
+
+        async def _set_one(index: int, item: tuple[str, Any]) -> BatchItemResult:
+            key, value = item
+            async with semaphore:
+                try:
+                    await self.set(key, value)
+                    return BatchItemResult(index=index, key_or_path=key, ok=True, value=True)
+                except Exception as exc:  # pragma: no cover - defensive fallback
+                    return BatchItemResult(index=index, key_or_path=key, ok=False, error=str(exc))
+
+        gathered = await asyncio.gather(
+            *(_set_one(index, item) for index, item in enumerate(items)),
+            return_exceptions=True,
+        )
+
+        results: list[BatchItemResult] = []
+        for index, raw_result in enumerate(gathered):
+            if isinstance(raw_result, BatchItemResult):
+                results.append(raw_result)
+            else:
+                key = items[index][0]
+                results.append(BatchItemResult(index=index, key_or_path=key, ok=False, error=str(raw_result)))
+        return BatchResult(items=results)
+
+    async def delete_many(self, keys: list[str], *, concurrency_limit: int = 10) -> BatchResult:
+        """Delete many keys with bounded concurrency and per-item outcomes."""
+        if concurrency_limit <= 0:
+            raise ValueError("concurrency_limit must be greater than 0")
+        if not keys:
+            return BatchResult()
+
+        semaphore = asyncio.Semaphore(concurrency_limit)
+
+        async def _delete_one(index: int, key: str) -> BatchItemResult:
+            async with semaphore:
+                try:
+                    deleted = await self.delete(key)
+                    return BatchItemResult(index=index, key_or_path=key, ok=True, value=deleted)
+                except Exception as exc:  # pragma: no cover - defensive fallback
+                    return BatchItemResult(index=index, key_or_path=key, ok=False, error=str(exc))
+
+        gathered = await asyncio.gather(
+            *(_delete_one(index, key) for index, key in enumerate(keys)),
+            return_exceptions=True,
+        )
+
+        results: list[BatchItemResult] = []
+        for index, raw_result in enumerate(gathered):
+            if isinstance(raw_result, BatchItemResult):
+                results.append(raw_result)
+            else:
+                results.append(BatchItemResult(index=index, key_or_path=keys[index], ok=False, error=str(raw_result)))
+        return BatchResult(items=results)
 
     async def exists(self, key: str) -> bool:
         """Return whether a key exists using simple KV semantics."""
