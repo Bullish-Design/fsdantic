@@ -9,6 +9,7 @@ from .exceptions import (
     FsdanticError,
     InvalidPathError,
     IsADirectoryError,
+    KVConflictError,
     KVStoreError,
     KeyNotFoundError,
     MaterializationError,
@@ -21,7 +22,7 @@ from .exceptions import (
 )
 from .client import Fsdantic
 from .files import FileManager, FileQuery
-from .kv import KVManager
+from .kv import KVManager, KVTransaction
 from .operations import FileOperations
 from .materialization import (
     ConflictResolution,
@@ -65,6 +66,7 @@ __all__ = [
     "FileManager",
     "FileQuery",
     "KVManager",
+    "KVTransaction",
     "OverlayManager",
     "OverlayOperations",
     "MaterializationManager",
@@ -106,6 +108,7 @@ __all__ = [
     "DirectoryNotEmptyError",
     "PermissionError",
     "InvalidPathError",
+    "KVConflictError",
     "KVStoreError",
     "KeyNotFoundError",
     "SerializationError",

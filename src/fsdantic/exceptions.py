@@ -64,6 +64,36 @@ class KVStoreError(FsdanticError):
     """Base error for key-value store operations."""
 
 
+class KVConflictError(KVStoreError):
+    """Raised when optimistic concurrency checks fail for a KV write.
+
+    Attributes:
+        code: Machine-readable error code for programmatic handling.
+        key: Conflicting key.
+        expected_version: Version/etag expected by the caller.
+        actual_version: Current version/etag observed in storage.
+    """
+
+    code = "kv_conflict"
+
+    def __init__(
+        self,
+        key: str,
+        expected_version: int | None,
+        actual_version: int | None,
+        *,
+        cause: Exception | None = None,
+    ) -> None:
+        super().__init__(
+            "KV version conflict for key "
+            f"'{key}' (expected={expected_version}, actual={actual_version})"
+        )
+        self.key = key
+        self.expected_version = expected_version
+        self.actual_version = actual_version
+        self.cause = cause
+
+
 class KeyNotFoundError(KVStoreError):
     """Raised when a key does not exist in the KV store."""
 

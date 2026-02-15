@@ -3,7 +3,7 @@
 import pytest
 from pydantic import BaseModel
 
-from fsdantic import KVRecord, TypedKVRepository, VersionedKVRecord, NamespacedKVStore
+from fsdantic import KVConflictError, KVRecord, TypedKVRepository, VersionedKVRecord, NamespacedKVStore
 from fsdantic.kv import KVManager
 
 
@@ -204,6 +204,48 @@ class TestTypedKVRepository:
         assert loaded.settings == {"key": "value"}
         assert loaded.version == 1
         assert hasattr(loaded, "created_at")
+
+
+
+    async def test_versioned_save_increments_version_and_rejects_stale_writes(self, agent_fs):
+        """Versioned saves should increment and reject stale writes."""
+        repo = TypedKVRepository[VersionedConfigRecord](agent_fs, prefix="vconfig:")
+
+        current = VersionedConfigRecord(settings={"n": 1})
+        await repo.save("app", current)
+        assert current.version == 1
+
+        loaded = await repo.load("app", VersionedConfigRecord)
+        assert loaded is not None
+        assert loaded.version == 1
+
+        await repo.save("app", loaded)
+        assert loaded.version == 2
+
+        stale = VersionedConfigRecord.model_validate({"settings": {"n": 99}, "version": 1})
+        with pytest.raises(KVConflictError) as exc_info:
+            await repo.save("app", stale)
+
+        assert exc_info.value.code == "kv_conflict"
+        assert exc_info.value.expected_version == 1
+        assert exc_info.value.actual_version == 2
+
+    async def test_additive_compare_and_set_methods(self, agent_fs):
+        """save_if_version/compare_and_set should enforce expected version."""
+        repo = TypedKVRepository[VersionedConfigRecord](agent_fs, prefix="vconfig:")
+
+        record = VersionedConfigRecord(settings={"mode": "a"})
+        await repo.save("cfg", record)
+
+        loaded = await repo.load("cfg", VersionedConfigRecord)
+        assert loaded is not None
+
+        await repo.save_if_version("cfg", loaded, expected_version=1)
+        assert loaded.version == 2
+
+        stale = VersionedConfigRecord.model_validate({"settings": {"mode": "b"}, "version": 1})
+        with pytest.raises(KVConflictError):
+            await repo.compare_and_set("cfg", stale, etag="1")
 
     async def test_list_all_skips_invalid_records(self, agent_fs):
         """list_all should skip records that fail validation."""

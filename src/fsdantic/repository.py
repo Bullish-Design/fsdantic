@@ -5,8 +5,9 @@ from typing import Any, Callable, Generic, Optional, Type, TypeVar
 from agentfs_sdk import AgentFS
 from pydantic import BaseModel
 
+from .exceptions import KVConflictError
 from .kv import KVManager
-from .models import BatchItemResult, BatchResult
+from .models import BatchItemResult, BatchResult, VersionedKVRecord
 
 _MISSING = object()
 
@@ -62,19 +63,114 @@ class TypedKVRepository(Generic[T]):
             )
         return resolved
 
-    async def save(self, id: str, record: T) -> None:
+    @staticmethod
+    def _coerce_expected_version(
+        *,
+        expected_version: int | None,
+        etag: int | str | None,
+    ) -> int | None:
+        if expected_version is not None and etag is not None:
+            raise ValueError("Provide either expected_version or etag, not both")
+        if etag is None:
+            return expected_version
+        if isinstance(etag, int):
+            return etag
+        if isinstance(etag, str) and etag.isdigit():
+            return int(etag)
+        raise ValueError("etag must be an int or numeric string")
+
+    @staticmethod
+    def _extract_version(payload: Any) -> int | None:
+        if isinstance(payload, dict):
+            value = payload.get("version")
+            if isinstance(value, int):
+                return value
+        return None
+
+    async def save(
+        self,
+        id: str,
+        record: T,
+        *,
+        expected_version: int | None = None,
+        etag: int | str | None = None,
+    ) -> None:
         """Save a record to KV store.
+
+        For ``VersionedKVRecord`` values, this method applies optimistic
+        concurrency checks and version increments:
+        - New records are created at version ``1``.
+        - Existing records require matching version/etag (or the record's own
+          version when no explicit expected version is provided).
+        - On success, the stored and in-memory record version is incremented.
 
         Args:
             id: Record identifier
             record: Pydantic model instance to save
-
-        Examples:
-            >>> await repo.save("user1", UserRecord(name="Bob", age=25))
+            expected_version: Optional optimistic concurrency expected version
+            etag: Optional alias for expected_version
         """
         key = self.key_builder(id)
+        resolved_expected = self._coerce_expected_version(expected_version=expected_version, etag=etag)
+
+        if isinstance(record, VersionedKVRecord):
+            current = await self._manager.get(key, default=None)
+            actual_version = self._extract_version(current)
+
+            if current is None:
+                effective_expected = resolved_expected
+                if effective_expected is not None:
+                    raise KVConflictError(key=key, expected_version=effective_expected, actual_version=None)
+                if record.version != 1:
+                    raise KVConflictError(key=key, expected_version=record.version, actual_version=None)
+                await self._manager.set(key, record.model_dump())
+                return
+
+            effective_expected = resolved_expected if resolved_expected is not None else record.version
+            if actual_version != effective_expected:
+                raise KVConflictError(
+                    key=key,
+                    expected_version=effective_expected,
+                    actual_version=actual_version,
+                )
+
+            updated_record = record.model_copy(deep=True)
+            updated_record.version = actual_version
+            updated_record.increment_version()
+            await self._manager.set(key, updated_record.model_dump())
+
+            # Keep caller instance in sync after successful commit.
+            record.version = updated_record.version
+            record.updated_at = updated_record.updated_at
+            return
+
+        if resolved_expected is not None:
+            current = await self._manager.get(key, default=None)
+            actual_version = self._extract_version(current)
+            if actual_version != resolved_expected:
+                raise KVConflictError(
+                    key=key,
+                    expected_version=resolved_expected,
+                    actual_version=actual_version,
+                )
+
         # AgentFS KV store accepts dicts, not JSON strings
         await self._manager.set(key, record.model_dump())
+
+    async def save_if_version(self, id: str, record: T, expected_version: int) -> None:
+        """Save only when current version matches ``expected_version``."""
+        await self.save(id, record, expected_version=expected_version)
+
+    async def compare_and_set(
+        self,
+        id: str,
+        record: T,
+        *,
+        expected_version: int | None = None,
+        etag: int | str | None = None,
+    ) -> None:
+        """Alias for save with explicit optimistic concurrency semantics."""
+        await self.save(id, record, expected_version=expected_version, etag=etag)
 
     async def load(self, id: str, model_type: Optional[Type[T]] = None) -> Optional[T]:
         """Load a record from KV store.
@@ -133,41 +229,19 @@ class TypedKVRepository(Generic[T]):
 
         for item in items:
             try:
-                # item is a dict with 'key' and 'value' fields
-                # value is already deserialized from JSON
                 records.append(resolved_model_type.model_validate(item["value"]))
             except Exception:
-                # Skip invalid records
                 continue
 
         return records
 
     async def exists(self, id: str) -> bool:
-        """Check if a record exists.
-
-        Args:
-            id: Record identifier
-
-        Returns:
-            True if record exists
-
-        Examples:
-            >>> if await repo.exists("user1"):
-            ...     print("User exists")
-        """
+        """Check if a record exists."""
         key = self.key_builder(id)
         return await self._manager.exists(key)
 
     async def list_ids(self) -> list[str]:
-        """List all IDs with the configured prefix.
-
-        Returns:
-            List of record IDs (with prefix removed)
-
-        Examples:
-            >>> ids = await repo.list_ids()
-            >>> print(f"Found {len(ids)} records")
-        """
+        """List all IDs with the configured prefix."""
         items = await self._manager.list(self.prefix)
         ids = []
 
@@ -205,12 +279,7 @@ class TypedKVRepository(Generic[T]):
         *,
         default: Any = _MISSING,
     ) -> BatchResult:
-        """Load many records with deterministic ordering and per-item outcomes.
-
-        Partial failures are captured per item and never abort the full batch.
-        Retry guidance: filter ``result.items`` where ``ok`` is ``False`` and call
-        ``load_many`` again with those IDs.
-        """
+        """Load many records with deterministic ordering and per-item outcomes."""
         resolved_model_type = self._resolve_model_type(model_type)
         keys = [self.key_builder(record_id) for record_id in ids]
         raw_result = await self._manager.get_many(keys, default=default)
@@ -270,39 +339,11 @@ class TypedKVRepository(Generic[T]):
 
 
 class NamespacedKVStore:
-    """Convenience wrapper for creating namespaced repositories.
-
-    Simplifies the creation of multiple repositories with different
-    prefixes from a single AgentFS instance.
-
-    Examples:
-        >>> kv = NamespacedKVStore(agent_fs)
-        >>> users = kv.namespace("user:")
-        >>> await users.save("alice", UserRecord(...))
-        >>>
-        >>> agents = kv.namespace("agent:")
-        >>> await agents.save("agent1", AgentRecord(...))
-    """
+    """Convenience wrapper for creating namespaced repositories."""
 
     def __init__(self, storage: AgentFS):
-        """Initialize namespaced KV store.
-
-        Args:
-            storage: AgentFS instance
-        """
         self.storage = storage
 
     def namespace(self, prefix: str) -> TypedKVRepository:
-        """Create a namespaced repository.
-
-        Args:
-            prefix: Namespace prefix
-
-        Returns:
-            TypedKVRepository instance
-
-        Examples:
-            >>> users_repo = kv.namespace("user:")
-            >>> await users_repo.save("alice", user)
-        """
+        """Create a namespaced repository."""
         return TypedKVRepository(self.storage, prefix=prefix)
