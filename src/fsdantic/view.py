@@ -1,9 +1,11 @@
 """View interface for querying AgentFS filesystem."""
 
+import codecs
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
+from collections.abc import AsyncIterator
 from typing import Callable, Optional
 
 from agentfs_sdk import AgentFS
@@ -11,7 +13,6 @@ from pydantic import BaseModel, Field
 
 from .files import FileManager, FileQuery
 from .models import FileEntry
-
 
 
 @dataclass
@@ -80,10 +81,7 @@ class View(BaseModel):
     model_config = {"arbitrary_types_allowed": True}
 
     agent: AgentFS = Field(description="AgentFS instance")
-    query: ViewQuery = Field(
-        default_factory=ViewQuery,
-        description="Query specification"
-    )
+    query: ViewQuery = Field(default_factory=ViewQuery, description="Query specification")
 
     async def load(self) -> list[FileEntry]:
         """Load files matching the query specification.
@@ -99,11 +97,7 @@ class View(BaseModel):
         manager = FileManager(self.agent)
         return await manager.query(self.query)
 
-
-    async def filter(
-        self,
-        predicate: Callable[[FileEntry], bool]
-    ) -> list[FileEntry]:
+    async def filter(self, predicate: Callable[[FileEntry], bool]) -> list[FileEntry]:
         """Load and filter files using a custom predicate function.
 
         Args:
@@ -163,8 +157,13 @@ class View(BaseModel):
         new_query = self.query.model_copy(update={"include_content": include})
         return View(agent=self.agent, query=new_query)
 
-    async def search_content(self) -> list[SearchMatch]:
+    async def search_content(self, *, streaming: bool = False, chunk_size: int = 65536) -> list[SearchMatch]:
         r"""Search file contents matching query patterns.
+
+        Args:
+            streaming: If True, search content via :meth:`FileManager.read_stream`.
+                This avoids loading each full file into memory in one payload.
+            chunk_size: Chunk size used when ``streaming=True``.
 
         Returns:
             List of SearchMatch objects
@@ -177,23 +176,16 @@ class View(BaseModel):
             ...         content_regex=r"def\s+\w+\(.*\):"
             ...     )
             ... )
-            >>> matches = await view.search_content()
+            >>> matches = await view.search_content(streaming=True)
             >>> for match in matches:
             ...     print(f"{match.file}:{match.line}: {match.text}")
         """
         if not self.query.content_pattern and not self.query.content_regex:
             raise ValueError("Either content_pattern or content_regex must be set")
+        if streaming and chunk_size <= 0:
+            raise ValueError("chunk_size must be greater than 0")
 
-        # Load files with content
-        original_include = self.query.include_content
-        self.query.include_content = True
-
-        try:
-            files = await self.load()
-        finally:
-            self.query.include_content = original_include
-
-        matches = []
+        matches: list[SearchMatch] = []
 
         # Compile regex pattern
         if self.query.content_regex:
@@ -205,6 +197,46 @@ class View(BaseModel):
 
         flags = 0 if self.query.case_sensitive else re.IGNORECASE
         regex = re.compile(pattern, flags)
+
+        if streaming:
+            manager = FileManager(self.agent)
+            file_query = self.query.model_copy(update={"include_content": False})
+            files = await manager.query(file_query)
+            for file in files:
+                file_matches = 0
+                try:
+                    line_num = 0
+                    async for line in self._iter_text_lines(manager.read_stream(file.path, chunk_size=chunk_size)):
+                        line_num += 1
+                        for match in regex.finditer(line):
+                            matches.append(
+                                SearchMatch(
+                                    file=file.path,
+                                    line=line_num,
+                                    text=line.strip(),
+                                    column=match.start(),
+                                    match_start=match.start(),
+                                    match_end=match.end(),
+                                )
+                            )
+                            file_matches += 1
+                            if self.query.max_matches_per_file and file_matches >= self.query.max_matches_per_file:
+                                break
+
+                        if self.query.max_matches_per_file and file_matches >= self.query.max_matches_per_file:
+                            break
+                except UnicodeDecodeError:
+                    continue
+            return matches
+
+        # Non-streaming path: load files with content
+        original_include = self.query.include_content
+        self.query.include_content = True
+
+        try:
+            files = await self.load()
+        finally:
+            self.query.include_content = original_include
 
         # Search each file
         for file in files:
@@ -236,23 +268,36 @@ class View(BaseModel):
                     )
 
                     file_matches += 1
-                    if (
-                        self.query.max_matches_per_file
-                        and file_matches >= self.query.max_matches_per_file
-                    ):
+                    if self.query.max_matches_per_file and file_matches >= self.query.max_matches_per_file:
                         break
 
-                if (
-                    self.query.max_matches_per_file
-                    and file_matches >= self.query.max_matches_per_file
-                ):
+                if self.query.max_matches_per_file and file_matches >= self.query.max_matches_per_file:
                     break
 
         return matches
 
-    async def files_containing(
-        self, pattern: str, regex: bool = False
-    ) -> list[FileEntry]:
+    @staticmethod
+    async def _iter_text_lines(chunks: AsyncIterator[bytes], encoding: str = "utf-8") -> AsyncIterator[str]:
+        """Yield decoded text lines from a byte chunk stream."""
+        decoder = codecs.getincrementaldecoder(encoding)()
+        buffer = ""
+
+        async for chunk in chunks:
+            text = decoder.decode(chunk)
+            buffer += text
+            while True:
+                new_line_index = buffer.find("\n")
+                if new_line_index == -1:
+                    break
+                yield buffer[:new_line_index]
+                buffer = buffer[new_line_index + 1 :]
+
+        remaining = decoder.decode(b"", final=True)
+        buffer += remaining
+        if buffer:
+            yield buffer
+
+    async def files_containing(self, pattern: str, regex: bool = False) -> list[FileEntry]:
         """Get files that contain the specified pattern.
 
         Args:
@@ -266,9 +311,7 @@ class View(BaseModel):
             >>> files = await view.files_containing("TODO")
             >>> print(f"Found {len(files)} files with TODOs")
         """
-        query = self.query.model_copy(
-            update={"content_regex" if regex else "content_pattern": pattern}
-        )
+        query = self.query.model_copy(update={"content_regex" if regex else "content_pattern": pattern})
         search_view = View(agent=self.agent, query=query)
         matches = await search_view.search_content()
 
@@ -278,9 +321,7 @@ class View(BaseModel):
         # Load file entries
         return [f for f in await self.load() if f.path in file_paths]
 
-    def with_size_range(
-        self, min_size: Optional[int] = None, max_size: Optional[int] = None
-    ) -> "View":
+    def with_size_range(self, min_size: Optional[int] = None, max_size: Optional[int] = None) -> "View":
         """Create view with size constraints.
 
         Args:
@@ -294,9 +335,7 @@ class View(BaseModel):
             >>> # Files between 1KB and 1MB
             >>> view = view.with_size_range(1024, 1024*1024)
         """
-        new_query = self.query.model_copy(
-            update={"min_size": min_size, "max_size": max_size}
-        )
+        new_query = self.query.model_copy(update={"min_size": min_size, "max_size": max_size})
         return View(agent=self.agent, query=new_query)
 
     def with_regex(self, pattern: str) -> "View":
@@ -334,11 +373,7 @@ class View(BaseModel):
         cutoff = datetime.now().timestamp() - max_age
 
         files = await self.load()
-        return [
-            f
-            for f in files
-            if f.stats and f.stats.mtime.timestamp() >= cutoff
-        ]
+        return [f for f in files if f.stats and f.stats.mtime.timestamp() >= cutoff]
 
     async def largest_files(self, n: int = 10) -> list[FileEntry]:
         """Get N largest files.

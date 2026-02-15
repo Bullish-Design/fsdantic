@@ -211,7 +211,6 @@ class TestFileManager:
             "/alpha/beta/other.py",
         }
 
-
     async def test_read_many_preserves_order_and_reports_partial_failures(self, agent_fs):
         """read_many should preserve order and report per-item failures."""
         ops = FileManager(agent_fs)
@@ -258,6 +257,35 @@ class TestFileManager:
         tree = await ops.tree("/", max_depth=1)
         assert tree["children"][0]["name"] == "level1"
         assert tree["children"][0]["children"] == []
+
+    async def test_read_stream_chunk_boundaries_and_parity(self, agent_fs):
+        """read_stream should yield stable chunk boundaries and exact bytes parity."""
+        ops = FileManager(agent_fs)
+        payload = b"abcdefghijkl"
+        await ops.write("/chunked.bin", payload, mode="binary")
+
+        chunks = [chunk async for chunk in ops.read_stream("/chunked.bin", chunk_size=5)]
+
+        assert chunks == [b"abcde", b"fghij", b"kl"]
+        assert b"".join(chunks) == payload
+        assert b"".join([c async for c in ops.read_stream("/chunked.bin", chunk_size=64)]) == payload
+
+    async def test_read_stream_falls_back_to_base_layer(self, agent_fs, stable_fs):
+        """read_stream should support overlay->base ENOENT fallback via read()."""
+        ops = FileManager(agent_fs, base_fs=stable_fs)
+        await stable_fs.fs.write_file("/base-only.bin", b"base-bytes")
+
+        streamed = b"".join([chunk async for chunk in ops.read_stream("/base-only.bin", chunk_size=3)])
+
+        assert streamed == b"base-bytes"
+
+    async def test_read_stream_rejects_invalid_chunk_size(self, agent_fs):
+        """read_stream should validate chunk size."""
+        ops = FileManager(agent_fs)
+        await ops.write("/value.bin", b"x", mode="binary")
+
+        with pytest.raises(ValueError, match="chunk_size must be greater than 0"):
+            _ = [chunk async for chunk in ops.read_stream("/value.bin", chunk_size=0)]
 
 
 @pytest.mark.asyncio
@@ -520,7 +548,6 @@ class TestFileManagerEdgeCases:
         with pytest.raises(ValueError, match="encoding must be provided when mode='text'"):
             await ops.read("/hello.txt", mode="text", encoding=None)
 
-
     async def test_list_dir_on_file_raises_not_a_directory(self, agent_fs):
         """Should raise NotADirectoryError when listing a file path."""
         ops = FileManager(agent_fs)
@@ -695,11 +722,7 @@ class TestFileManagerErrorTranslation:
     async def test_read_translates_with_context_and_normalized_path(self):
         manager = FileManager(
             _FakeAgent(
-                _FakeFsBoundary(
-                    read_error=lambda path: ErrnoException(
-                        "EPERM", "read", path=path, message="blocked"
-                    )
-                )
+                _FakeFsBoundary(read_error=lambda path: ErrnoException("EPERM", "read", path=path, message="blocked"))
             )
         )
 
@@ -712,9 +735,7 @@ class TestFileManagerErrorTranslation:
         manager = FileManager(
             _FakeAgent(
                 _FakeFsBoundary(
-                    read_error=lambda path: ErrnoException(
-                        "EISDIR", "read", path=path, message="is a directory"
-                    )
+                    read_error=lambda path: ErrnoException("EISDIR", "read", path=path, message="is a directory")
                 )
             )
         )
@@ -731,9 +752,7 @@ class TestFileManagerErrorTranslation:
         manager = FileManager(
             _FakeAgent(
                 _FakeFsBoundary(
-                    write_error=lambda path: ErrnoException(
-                        "EISDIR", "write", path=path, message="is a directory"
-                    )
+                    write_error=lambda path: ErrnoException("EISDIR", "write", path=path, message="is a directory")
                 )
             )
         )
@@ -749,11 +768,7 @@ class TestFileManagerErrorTranslation:
     async def test_stat_translates_with_context_and_normalized_path(self):
         manager = FileManager(
             _FakeAgent(
-                _FakeFsBoundary(
-                    stat_error=lambda path: ErrnoException(
-                        "ENOTDIR", "stat", path=path, message="bad dir"
-                    )
-                )
+                _FakeFsBoundary(stat_error=lambda path: ErrnoException("ENOTDIR", "stat", path=path, message="bad dir"))
             )
         )
 
@@ -768,11 +783,7 @@ class TestFileManagerErrorTranslation:
     async def test_remove_translates_with_context_and_normalized_path(self):
         manager = FileManager(
             _FakeAgent(
-                _FakeFsBoundary(
-                    stat_error=lambda path: ErrnoException(
-                        "EPERM", "stat", path=path, message="denied"
-                    )
-                )
+                _FakeFsBoundary(stat_error=lambda path: ErrnoException("EPERM", "stat", path=path, message="denied"))
             )
         )
 
@@ -788,9 +799,7 @@ class TestFileManagerErrorTranslation:
         manager = FileManager(
             _FakeAgent(
                 _FakeFsBoundary(
-                    readdir_error=lambda path: ErrnoException(
-                        "EPERM", "readdir", path=path, message="no access"
-                    )
+                    readdir_error=lambda path: ErrnoException("EPERM", "readdir", path=path, message="no access")
                 )
             )
         )
@@ -805,9 +814,7 @@ class TestFileManagerErrorTranslation:
         manager = FileManager(
             _FakeAgent(
                 _FakeFsBoundary(
-                    readdir_error=lambda path: ErrnoException(
-                        "EPERM", "readdir", path=path, message="blocked tree"
-                    )
+                    readdir_error=lambda path: ErrnoException("EPERM", "readdir", path=path, message="blocked tree")
                 )
             )
         )
@@ -821,15 +828,11 @@ class TestFileManagerErrorTranslation:
     async def test_view_load_surfaces_same_query_translation_as_filemanager(self):
         fake_agent = _FakeAgent(
             _FakeFsBoundary(
-                readdir_error=lambda path: ErrnoException(
-                    "EPERM", "readdir", path=path, message="no access"
-                )
+                readdir_error=lambda path: ErrnoException("EPERM", "readdir", path=path, message="no access")
             )
         )
         manager = FileManager(fake_agent)
-        view = View.model_construct(
-            agent=fake_agent, query=ViewQuery(path_pattern="*.txt")
-        )
+        view = View.model_construct(agent=fake_agent, query=ViewQuery(path_pattern="*.txt"))
 
         with pytest.raises(PermissionError) as direct_exc:
             await manager.query(view.query)
@@ -843,11 +846,7 @@ class TestFileManagerErrorTranslation:
     async def test_unknown_errno_fallback_remains_file_system_error_with_context(self):
         manager = FileManager(
             _FakeAgent(
-                _FakeFsBoundary(
-                    stat_error=lambda path: ErrnoException(
-                        "ENOSYS", "stat", path=path, message="unknown"
-                    )
-                )
+                _FakeFsBoundary(stat_error=lambda path: ErrnoException("ENOSYS", "stat", path=path, message="unknown"))
             )
         )
 

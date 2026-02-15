@@ -264,6 +264,19 @@ class TestMaterializerDiff:
         modified = [c for c in changes if c.change_type == "modified" and c.path == "/same.txt"]
         assert len(modified) == 0
 
+    async def test_diff_detects_same_size_content_change(self, agent_fs, stable_fs):
+        """Diff should detect modifications even when old/new sizes are equal."""
+        await stable_fs.fs.write_file("/same-size.bin", b"abc123")
+        await agent_fs.fs.write_file("/same-size.bin", b"xyz123")
+
+        materializer = Materializer()
+        changes = await materializer.diff(agent_fs, stable_fs)
+
+        modified = [c for c in changes if c.path == "/same-size.bin" and c.change_type == "modified"]
+        assert len(modified) == 1
+        assert modified[0].old_size == 6
+        assert modified[0].new_size == 6
+
 
 @pytest.mark.asyncio
 class TestMaterializerProgressCallback:

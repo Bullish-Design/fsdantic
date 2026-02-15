@@ -59,10 +59,10 @@ class FileQuery(BaseModel):
         pieces: list[str] = ["^"]
         i = 0
         while i < len(pattern):
-            if pattern[i:i + 3] == "**/":
+            if pattern[i : i + 3] == "**/":
                 pieces.append("(?:.*/)?")
                 i += 3
-            elif pattern[i:i + 2] == "**":
+            elif pattern[i : i + 2] == "**":
                 pieces.append(".*")
                 i += 2
             elif pattern[i] == "*":
@@ -79,11 +79,7 @@ class FileQuery(BaseModel):
 
     @model_validator(mode="after")
     def _validate_and_prepare_matchers(self) -> "FileQuery":
-        if (
-            self.min_size is not None
-            and self.max_size is not None
-            and self.min_size > self.max_size
-        ):
+        if self.min_size is not None and self.max_size is not None and self.min_size > self.max_size:
             raise ValueError("min_size must be less than or equal to max_size")
 
         self._normalized_path_pattern = self._normalize_path_pattern(self.path_pattern)
@@ -155,6 +151,10 @@ class FileManager:
 
         * ``mode='text'`` returns ``str`` and requires a valid text ``encoding``.
         * ``mode='binary'`` returns ``bytes`` and requires ``encoding=None``.
+
+        Use :meth:`read_stream` when handling large binary files to avoid keeping
+        the full content in memory at once. Use ``read()`` for convenience when
+        full in-memory content is acceptable.
         """
         path = normalize_path(path)
         context = f"FileManager.read(path={path!r})"
@@ -197,6 +197,38 @@ class FileManager:
         except ErrnoException as base_error:
             raise translate_agentfs_error(base_error, context) from base_error
 
+    async def read_stream(
+        self,
+        path: str,
+        *,
+        chunk_size: int = 65536,
+    ) -> AsyncIterator[bytes]:
+        """Read a file as a chunked async byte stream.
+
+        AgentFS currently exposes ``read_file()`` but does not expose a native
+        streaming API. This method therefore uses a fallback strategy: it reads
+        the file once in binary mode and yields ``chunk_size`` byte slices from
+        that in-memory payload.
+
+        Reads from overlay first and falls through to ``base_fs`` on ``ENOENT``.
+
+        Args:
+            path: File path to read.
+            chunk_size: Number of bytes per yielded chunk. Must be greater than 0.
+
+        Yields:
+            Byte chunks in file order.
+        """
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be greater than 0")
+
+        payload = await self.read(path, mode="binary")
+        if not isinstance(payload, bytes):  # pragma: no cover - defensive guard
+            raise TypeError("read_stream expected bytes payload")
+
+        for offset in range(0, len(payload), chunk_size):
+            yield payload[offset : offset + chunk_size]
+
     async def write(
         self,
         path: str,
@@ -222,7 +254,6 @@ class FileManager:
             await self.agent_fs.fs.write_file(path, payload)
         except ErrnoException as e:
             raise translate_agentfs_error(e, context) from e
-
 
     async def read_many(
         self,
@@ -492,9 +523,7 @@ class FileManager:
         entries: list[FileEntry] = []
         include_stats = query.needs_file_stats()
 
-        async for item_path, stats in self.traverse_files(
-            "/", recursive=query.recursive, include_stats=include_stats
-        ):
+        async for item_path, stats in self.traverse_files("/", recursive=query.recursive, include_stats=include_stats):
             if not query.matches_path(item_path):
                 continue
             if not query.matches_regex(item_path):
@@ -536,9 +565,7 @@ class FileManager:
         """Count files matching a query contract."""
         count = 0
         include_stats = query.min_size is not None or query.max_size is not None
-        async for item_path, stats in self.traverse_files(
-            "/", recursive=query.recursive, include_stats=include_stats
-        ):
+        async for item_path, stats in self.traverse_files("/", recursive=query.recursive, include_stats=include_stats):
             if not query.matches_path(item_path):
                 continue
             if not query.matches_regex(item_path):
@@ -548,9 +575,7 @@ class FileManager:
             count += 1
         return count
 
-    async def tree(
-        self, path: str = "/", max_depth: Optional[int] = None
-    ) -> dict[str, Any]:
+    async def tree(self, path: str = "/", max_depth: Optional[int] = None) -> dict[str, Any]:
         """Return a stable tree schema rooted at path.
 
         Returns a node dictionary with the shape:
@@ -591,9 +616,7 @@ class FileManager:
                 except ErrnoException as e:
                     if e.code == "ENOENT":
                         continue
-                    context = (
-                        f"FileManager.tree(path={path!r}, current_path={current_path!r})"
-                    )
+                    context = f"FileManager.tree(path={path!r}, current_path={current_path!r})"
                     raise translate_agentfs_error(e, context) from e
 
                 if stat.is_directory():
@@ -637,9 +660,7 @@ class FileManager:
                 except ErrnoException as error:
                     if error.code == "ENOENT":
                         continue
-                    context = (
-                        f"FileManager.traverse_files(root={root!r}, current_path={item_path!r})"
-                    )
+                    context = f"FileManager.traverse_files(root={root!r}, current_path={item_path!r})"
                     raise translate_agentfs_error(error, context) from error
 
                 if stats.is_directory():
