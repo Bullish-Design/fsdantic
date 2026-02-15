@@ -115,6 +115,32 @@ bob = await repo.load("bob")
 all_users = await repo.list_all()
 ```
 
+### 2.5) Batch APIs (deterministic ordering + partial failures)
+
+```python
+# file batch reads
+file_reads = await workspace.files.read_many(["/a.txt", "/missing.txt", "/b.txt"])
+for item in file_reads.items:  # item.index preserves caller order
+    if item.ok:
+        print(item.key_or_path, item.value)
+    else:
+        print("read failed", item.key_or_path, item.error)
+
+# bounded fan-out writes
+write_result = await workspace.files.write_many(
+    [("/out-1.txt", "one"), ("/out-2.txt", "two")],
+    concurrency_limit=5,
+)
+
+# KV + repository batch APIs
+kv_result = await workspace.kv.get_many(["settings:theme", "settings:tz"], default="UTC")
+repo_result = await repo.load_many(["alice", "bob"], default=None)
+```
+
+Batch APIs return per-item outcomes instead of all-or-nothing behavior.
+Successful and failed items are returned together in input order, so callers can
+retry only failed items by filtering ``result.items`` where ``ok`` is ``False``.
+
 ### 3) Overlay operations
 
 ```python

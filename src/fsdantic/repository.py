@@ -1,11 +1,14 @@
 """Generic repository pattern for AgentFS KV operations."""
 
-from typing import Callable, Generic, Optional, Type, TypeVar
+from typing import Any, Callable, Generic, Optional, Type, TypeVar
 
 from agentfs_sdk import AgentFS
 from pydantic import BaseModel
 
 from .kv import KVManager
+from .models import BatchItemResult, BatchResult
+
+_MISSING = object()
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -41,7 +44,7 @@ class TypedKVRepository(Generic[T]):
             storage: AgentFS instance
             prefix: Key prefix for namespacing (e.g., "user:", "agent:")
             model_type: Optional default Pydantic model class used by
-                `load`, `list_all`, and `load_batch` when not provided
+                `load`, `list_all`, and `load_many` when not provided
             key_builder: Optional function to build keys from IDs
         """
         self.storage = storage
@@ -175,58 +178,94 @@ class TypedKVRepository(Generic[T]):
 
         return ids
 
-    async def save_batch(self, records: list[tuple[str, T]]) -> None:
-        """Save multiple records in batch.
+    async def save_many(
+        self,
+        records: list[tuple[str, T]],
+        *,
+        concurrency_limit: int = 10,
+    ) -> BatchResult:
+        """Save many records with bounded concurrency and per-item outcomes."""
+        payload = [(self.key_builder(record_id), record.model_dump()) for record_id, record in records]
+        return await self._manager.set_many(payload, concurrency_limit=concurrency_limit)
 
-        Args:
-            records: List of (id, record) tuples to save
+    async def delete_many(
+        self,
+        ids: list[str],
+        *,
+        concurrency_limit: int = 10,
+    ) -> BatchResult:
+        """Delete many records with bounded concurrency and per-item outcomes."""
+        keys = [self.key_builder(record_id) for record_id in ids]
+        return await self._manager.delete_many(keys, concurrency_limit=concurrency_limit)
 
-        Examples:
-            >>> await repo.save_batch([
-            ...     ("user1", UserRecord(name="Alice", age=30)),
-            ...     ("user2", UserRecord(name="Bob", age=25))
-            ... ])
+    async def load_many(
+        self,
+        ids: list[str],
+        model_type: Optional[Type[T]] = None,
+        *,
+        default: Any = _MISSING,
+    ) -> BatchResult:
+        """Load many records with deterministic ordering and per-item outcomes.
+
+        Partial failures are captured per item and never abort the full batch.
+        Retry guidance: filter ``result.items`` where ``ok`` is ``False`` and call
+        ``load_many`` again with those IDs.
         """
-        for record_id, record in records:
-            await self.save(record_id, record)
+        resolved_model_type = self._resolve_model_type(model_type)
+        keys = [self.key_builder(record_id) for record_id in ids]
+        raw_result = await self._manager.get_many(keys, default=default)
+
+        items: list[BatchItemResult] = []
+        for index, item in enumerate(raw_result.items):
+            if not item.ok:
+                items.append(
+                    BatchItemResult(
+                        index=index,
+                        key_or_path=ids[index],
+                        ok=False,
+                        error=item.error,
+                    )
+                )
+                continue
+
+            value = item.value
+            if value is None:
+                items.append(BatchItemResult(index=index, key_or_path=ids[index], ok=True, value=None))
+                continue
+
+            try:
+                model = resolved_model_type.model_validate(value)
+                items.append(BatchItemResult(index=index, key_or_path=ids[index], ok=True, value=model))
+            except Exception as exc:
+                items.append(
+                    BatchItemResult(
+                        index=index,
+                        key_or_path=ids[index],
+                        ok=False,
+                        error=str(exc),
+                    )
+                )
+
+        return BatchResult(items=items)
+
+    async def save_batch(self, records: list[tuple[str, T]]) -> None:
+        """Compatibility wrapper for :meth:`save_many`."""
+        await self.save_many(records)
 
     async def delete_batch(self, ids: list[str]) -> None:
-        """Delete multiple records in batch.
-
-        Args:
-            ids: List of record IDs to delete
-
-        Examples:
-            >>> await repo.delete_batch(["user1", "user2", "user3"])
-        """
-        for record_id in ids:
-            await self.delete(record_id)
+        """Compatibility wrapper for :meth:`delete_many`."""
+        await self.delete_many(ids)
 
     async def load_batch(
         self,
         ids: list[str],
         model_type: Optional[Type[T]] = None,
     ) -> dict[str, Optional[T]]:
-        """Load multiple records in batch.
-
-        Args:
-            ids: List of record IDs to load
-            model_type: Optional Pydantic model class. If omitted, uses the
-                repository default `model_type` configured at construction.
-
-        Returns:
-            Dictionary mapping IDs to records (None if not found)
-
-        Examples:
-            >>> records = await repo.load_batch(["user1", "user2"], UserRecord)
-            >>> for id, record in records.items():
-            ...     if record:
-            ...         print(f"{id}: {record.name}")
-        """
-        results = {}
-        resolved_model_type = self._resolve_model_type(model_type)
-        for record_id in ids:
-            results[record_id] = await self.load(record_id, resolved_model_type)
+        """Compatibility wrapper for :meth:`load_many`."""
+        batch = await self.load_many(ids, model_type=model_type, default=None)
+        results: dict[str, Optional[T]] = {}
+        for record_id, item in zip(ids, batch.items):
+            results[record_id] = item.value if item.ok else None
         return results
 
 

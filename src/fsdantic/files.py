@@ -1,5 +1,6 @@
 """Primary public API for file operations and traversal."""
 
+import asyncio
 import logging
 import codecs
 import json
@@ -13,7 +14,7 @@ from pydantic import BaseModel, Field, PrivateAttr, model_validator
 from ._internal.errors import translate_agentfs_error
 from .exceptions import FileNotFoundError
 from ._internal.paths import join_normalized_path, normalize_glob_pattern, normalize_path
-from .models import FileEntry, FileStats
+from .models import BatchItemResult, BatchResult, FileEntry, FileStats
 
 
 logger = logging.getLogger(__name__)
@@ -221,6 +222,105 @@ class FileManager:
             await self.agent_fs.fs.write_file(path, payload)
         except ErrnoException as e:
             raise translate_agentfs_error(e, context) from e
+
+
+    async def read_many(
+        self,
+        paths: list[str],
+        *,
+        mode: Literal["text", "binary"] = "text",
+        encoding: str | None | _UnsetEncoding = _UNSET,
+    ) -> BatchResult:
+        """Read multiple files with deterministic ordering and per-item outcomes.
+
+        This API always returns a ``BatchResult`` containing one ``BatchItemResult``
+        per input path in the same order as ``paths``. Partial failures do not abort
+        the batch; failed items include ``error`` and can be retried individually.
+        """
+        if not paths:
+            return BatchResult()
+
+        async def _read_one(index: int, raw_path: str) -> BatchItemResult:
+            path = normalize_path(raw_path)
+            try:
+                value = await self.read(path, mode=mode, encoding=encoding)
+                return BatchItemResult(index=index, key_or_path=path, ok=True, value=value)
+            except Exception as exc:  # pragma: no cover - defensive fallback
+                return BatchItemResult(index=index, key_or_path=path, ok=False, error=str(exc))
+
+        gathered = await asyncio.gather(
+            *(_read_one(index, path) for index, path in enumerate(paths)),
+            return_exceptions=True,
+        )
+
+        items: list[BatchItemResult] = []
+        for index, raw_result in enumerate(gathered):
+            if isinstance(raw_result, BatchItemResult):
+                items.append(raw_result)
+            else:
+                path = normalize_path(paths[index])
+                items.append(
+                    BatchItemResult(
+                        index=index,
+                        key_or_path=path,
+                        ok=False,
+                        error=str(raw_result),
+                    )
+                )
+        return BatchResult(items=items)
+
+    async def write_many(
+        self,
+        items: list[tuple[str, str | bytes | dict[str, Any] | list[Any]]],
+        *,
+        mode: Literal["text", "binary", "json"] | None = None,
+        encoding: str = "utf-8",
+        concurrency_limit: int = 10,
+    ) -> BatchResult:
+        """Write multiple files with bounded concurrency and per-item outcomes.
+
+        ``concurrency_limit`` bounds fan-out using ``asyncio.Semaphore``. Results
+        preserve the original ``items`` ordering. Failed writes are reported per item
+        and do not cancel successful writes. Retry guidance: build a new batch from
+        items where ``ok`` is ``False``.
+        """
+        if concurrency_limit <= 0:
+            raise ValueError("concurrency_limit must be greater than 0")
+        if not items:
+            return BatchResult()
+
+        semaphore = asyncio.Semaphore(concurrency_limit)
+
+        async def _write_one(index: int, item: tuple[str, str | bytes | dict[str, Any] | list[Any]]) -> BatchItemResult:
+            path, content = item
+            normalized_path = normalize_path(path)
+            async with semaphore:
+                try:
+                    await self.write(normalized_path, content, mode=mode, encoding=encoding)
+                    return BatchItemResult(index=index, key_or_path=normalized_path, ok=True, value=True)
+                except Exception as exc:  # pragma: no cover - defensive fallback
+                    return BatchItemResult(index=index, key_or_path=normalized_path, ok=False, error=str(exc))
+
+        gathered = await asyncio.gather(
+            *(_write_one(index, item) for index, item in enumerate(items)),
+            return_exceptions=True,
+        )
+
+        results: list[BatchItemResult] = []
+        for index, raw_result in enumerate(gathered):
+            if isinstance(raw_result, BatchItemResult):
+                results.append(raw_result)
+            else:
+                normalized_path = normalize_path(items[index][0])
+                results.append(
+                    BatchItemResult(
+                        index=index,
+                        key_or_path=normalized_path,
+                        ok=False,
+                        error=str(raw_result),
+                    )
+                )
+        return BatchResult(items=results)
 
     @staticmethod
     def _validate_encoding(encoding: str) -> None:
