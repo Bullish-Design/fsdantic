@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Workspace materialization for AgentFS overlays."""
+
+from __future__ import annotations
 
 import shutil
 from dataclasses import dataclass
@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING, Callable, Optional
 from agentfs_sdk import AgentFS, ErrnoException
 
 from ._internal.errors import translate_agentfs_error
+from ._internal.streaming import compare_streams, hash_stream
+from .files import FileManager
 from .view import ViewQuery
 
 if TYPE_CHECKING:
@@ -134,14 +136,10 @@ class Materializer:
 
         # Materialize base layer first if provided
         if base_fs is not None:
-            await self._copy_recursive(
-                base_fs, "/", target_path, stats, changes, skipped, errors
-            )
+            await self._copy_recursive(base_fs, "/", target_path, stats, changes, skipped, errors)
 
         # Materialize overlay layer
-        await self._copy_recursive(
-            agent_fs, "/", target_path, stats, changes, skipped, errors, filters=filters
-        )
+        await self._copy_recursive(agent_fs, "/", target_path, stats, changes, skipped, errors, filters=filters)
 
         return MaterializationResult(
             target_path=target_path,
@@ -152,9 +150,7 @@ class Materializer:
             errors=errors,
         )
 
-    async def diff(
-        self, overlay_fs: AgentFS, base_fs: AgentFS, path: str = "/"
-    ) -> list[FileChange]:
+    async def diff(self, overlay_fs: AgentFS, base_fs: AgentFS, path: str = "/") -> list[FileChange]:
         """Compute changes between overlay and base.
 
         Args:
@@ -171,6 +167,8 @@ class Materializer:
             ...     print(f"{change.change_type}: {change.path}")
         """
         changes = []
+        overlay_manager = FileManager(overlay_fs)
+        base_manager = FileManager(base_fs)
 
         # Get all files from both layers
         overlay_files = await self._list_all_files(overlay_fs, path)
@@ -181,11 +179,7 @@ class Materializer:
 
         # Added files
         for file_path in overlay_set - base_set:
-            changes.append(
-                FileChange(
-                    path=file_path, change_type="added", new_size=overlay_files[file_path]
-                )
-            )
+            changes.append(FileChange(path=file_path, change_type="added", new_size=overlay_files[file_path]))
 
         # Modified files
         for file_path in overlay_set & base_set:
@@ -202,20 +196,25 @@ class Materializer:
                     )
                 )
             else:
-                # Size same, check content
+                # Size same: prefer hash-first comparison, then byte-accurate fallback.
                 try:
-                    overlay_content = await overlay_fs.fs.read_file(file_path, encoding=None)
-                    base_content = await base_fs.fs.read_file(file_path, encoding=None)
+                    overlay_hash = await hash_stream(overlay_manager.read_stream(file_path))
+                    base_hash = await hash_stream(base_manager.read_stream(file_path))
 
-                    if overlay_content != base_content:
-                        changes.append(
-                            FileChange(
-                                path=file_path,
-                                change_type="modified",
-                                old_size=base_size,
-                                new_size=overlay_size,
-                            )
+                    if overlay_hash != base_hash:
+                        is_equal = await compare_streams(
+                            overlay_manager.read_stream(file_path),
+                            base_manager.read_stream(file_path),
                         )
+                        if not is_equal:
+                            changes.append(
+                                FileChange(
+                                    path=file_path,
+                                    change_type="modified",
+                                    old_size=base_size,
+                                    new_size=overlay_size,
+                                )
+                            )
                 except ErrnoException as e:
                     # If files disappear during diff, skip only missing files
                     if e.code != "ENOENT":
@@ -305,9 +304,7 @@ class Materializer:
                     stats["bytes_written"] += len(content)
 
                     # Track change
-                    changes.append(
-                        FileChange(path=entry_path, change_type="added", new_size=len(content))
-                    )
+                    changes.append(FileChange(path=entry_path, change_type="added", new_size=len(content)))
 
                     # Progress callback
                     if self.progress_callback:

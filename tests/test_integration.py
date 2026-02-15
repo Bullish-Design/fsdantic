@@ -608,9 +608,7 @@ class TestContentSearchIntegration:
             agent = await AgentFS.open(SDKAgentFSOptions(path=agent_path))
 
             try:
-                await agent.fs.write_file(
-                    "/numbered.txt", "line 1\nline 2 MATCH\nline 3\nline 4 MATCH\nline 5"
-                )
+                await agent.fs.write_file("/numbered.txt", "line 1\nline 2 MATCH\nline 3\nline 4 MATCH\nline 5")
 
                 view = View(
                     agent=agent,
@@ -627,6 +625,33 @@ class TestContentSearchIntegration:
                 line_numbers = [m.line for m in matches]
                 assert 2 in line_numbers
                 assert 4 in line_numbers
+
+            finally:
+                await agent._db.close()
+
+    async def test_search_content_streaming_parity_and_chunk_boundaries(self):
+        """Streaming search should match non-streaming results for large text files."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            agent_path = os.path.join(tmpdir, "agent.db")
+            agent = await AgentFS.open(SDKAgentFSOptions(path=agent_path))
+
+            try:
+                content = "\n".join([f"line-{i}: KEY" if i % 7 == 0 else f"line-{i}: value" for i in range(120)])
+                await agent.fs.write_file("/large.txt", content)
+
+                view = View(
+                    agent=agent,
+                    query=ViewQuery(
+                        path_pattern="*.txt",
+                        content_pattern="KEY",
+                        include_content=True,
+                    ),
+                )
+
+                classic = await view.search_content()
+                streamed = await view.search_content(streaming=True, chunk_size=17)
+
+                assert [(m.line, m.text) for m in streamed] == [(m.line, m.text) for m in classic]
 
             finally:
                 await agent._db.close()
