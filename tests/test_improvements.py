@@ -180,6 +180,7 @@ class TestCustomExceptions:
 
         assert str(error) == "Conflicts detected"
         assert error.conflicts == conflicts
+        assert error.to_dict()["context"]["conflicts"] == conflicts
 
     def test_merge_conflict_error_catchable(self):
         """Should be catchable as MergeConflictError."""

@@ -214,6 +214,10 @@ class MergeConflictError(OverlayError):
         super().__init__(message, context={"conflicts": conflicts}, cause=cause)
         self.conflicts = conflicts
 
+    def __str__(self) -> str:
+        """Return only the base message for backward compatibility."""
+        return str(self.args[0]) if self.args else self.__class__.__name__
+
 
 class MaterializationError(FsdanticError):
     """Raised when workspace materialization fails."""
