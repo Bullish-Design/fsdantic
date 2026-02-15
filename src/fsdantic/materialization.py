@@ -288,14 +288,6 @@ class Materializer:
                 )
                 continue
 
-            # Metadata pre-check avoids unnecessary stream reads for unchanged files.
-            if (
-                overlay_meta.mtime_ns is not None
-                and base_meta.mtime_ns is not None
-                and overlay_meta.mtime_ns == base_meta.mtime_ns
-            ):
-                continue
-
             # Hash-first comparison, then byte-accurate fallback on mismatch.
             try:
                 overlay_hash = await hash_stream(overlay_manager.read_stream(file_path))
