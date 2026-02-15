@@ -85,12 +85,13 @@ class KVTransaction:
         if self._committed:
             return
 
+        tx_missing = object()
         applied: list[tuple[_StagedOperation, bool, Any]] = []
 
         try:
             for staged in self._staged.values():
-                old_value = await self._manager.get(staged.key, default=_MISSING)
-                existed = old_value is not _MISSING
+                old_value = await self._manager.get(staged.key, default=tx_missing)
+                existed = old_value is not tx_missing
 
                 if staged.op == "set":
                     await self._manager.set(staged.key, staged.value)
