@@ -3,7 +3,7 @@
 from typing import Any, Callable, Generic, Optional, Type, TypeVar
 
 from agentfs_sdk import AgentFS
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from .exceptions import KVConflictError
 from .kv import KVManager
@@ -21,7 +21,7 @@ class TypedKVRepository(Generic[T]):
     Pydantic models in the AgentFS key-value store.
 
     Examples:
-        >>> from pydantic import BaseModel
+        >>> from pydantic import BaseModel, ValidationError
         >>> class UserRecord(BaseModel):
         ...     name: str
         ...     age: int
@@ -230,7 +230,7 @@ class TypedKVRepository(Generic[T]):
         for item in items:
             try:
                 records.append(resolved_model_type.model_validate(item["value"]))
-            except Exception:
+            except ValidationError:
                 continue
 
         return records
@@ -305,7 +305,7 @@ class TypedKVRepository(Generic[T]):
             try:
                 model = resolved_model_type.model_validate(value)
                 items.append(BatchItemResult(index=index, key_or_path=ids[index], ok=True, value=model))
-            except Exception as exc:
+            except ValidationError as exc:
                 items.append(
                     BatchItemResult(
                         index=index,

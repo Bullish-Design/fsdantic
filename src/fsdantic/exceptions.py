@@ -5,12 +5,63 @@ from __future__ import annotations
 from typing import Any
 
 
+def _safe_context_value(value: Any) -> Any:
+    """Return a JSON-friendly representation for context values."""
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, bytes):
+        return f"<bytes:{len(value)}>"
+    if isinstance(value, dict):
+        return {str(key): _safe_context_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_safe_context_value(item) for item in value]
+    return repr(value)
+
+
 class FsdanticError(Exception):
     """Base exception for all fsdantic errors."""
+
+    default_code = "FSDANTIC_ERROR"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        context: dict[str, Any] | None = None,
+        cause: Any | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code or self.default_code
+        self.context = context
+        self.cause = cause
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize this error into a stable machine-readable dictionary."""
+        payload: dict[str, Any] = {
+            "type": self.__class__.__name__,
+            "message": str(self.args[0]) if self.args else "",
+            "code": self.code,
+        }
+        if self.context:
+            payload["context"] = _safe_context_value(self.context)
+        return payload
+
+    def __str__(self) -> str:
+        message = str(self.args[0]) if self.args else self.__class__.__name__
+        if not self.context:
+            return message
+        safe_context = _safe_context_value(self.context)
+        return f"{message} | context={safe_context}"
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}({self.to_dict()!r})"
 
 
 class RepositoryError(FsdanticError):
     """Base error for repository-related operations."""
+
+    default_code = "REPOSITORY_ERROR"
 
 
 class FileSystemError(FsdanticError):
@@ -21,47 +72,75 @@ class FileSystemError(FsdanticError):
         cause: Original low-level exception, if available.
     """
 
+    default_code = "FS_ERROR"
+
     def __init__(
         self,
         message: str,
         path: str | None = None,
-        cause: Exception | None = None,
+        cause: Any | None = None,
+        *,
+        context: dict[str, Any] | None = None,
+        code: str | None = None,
     ) -> None:
-        super().__init__(message)
+        merged_context = {"path": path} if path is not None else {}
+        if context:
+            merged_context.update(context)
+        super().__init__(
+            message,
+            code=code,
+            context=merged_context or None,
+            cause=cause,
+        )
         self.path = path
-        self.cause = cause
 
 
 class FileNotFoundError(FileSystemError):
     """Raised when a requested file or directory does not exist."""
 
+    default_code = "FS_NOT_FOUND"
+
 
 class FileExistsError(FileSystemError):
     """Raised when a file or directory already exists."""
+
+    default_code = "FS_ALREADY_EXISTS"
 
 
 class NotADirectoryError(FileSystemError):
     """Raised when a directory operation targets a non-directory path."""
 
+    default_code = "FS_NOT_A_DIRECTORY"
+
 
 class IsADirectoryError(FileSystemError):
     """Raised when a file operation targets a directory path."""
+
+    default_code = "FS_IS_A_DIRECTORY"
 
 
 class DirectoryNotEmptyError(FileSystemError):
     """Raised when attempting to remove a non-empty directory."""
 
+    default_code = "FS_DIRECTORY_NOT_EMPTY"
+
 
 class PermissionError(FileSystemError):
     """Raised when filesystem permissions deny an operation."""
+
+    default_code = "FS_PERMISSION_DENIED"
 
 
 class InvalidPathError(FileSystemError):
     """Raised when a provided filesystem path is invalid."""
 
+    default_code = "FS_INVALID_PATH"
+
 
 class KVStoreError(FsdanticError):
     """Base error for key-value store operations."""
+
+    default_code = "KV_ERROR"
 
 
 class KVConflictError(KVStoreError):
@@ -74,7 +153,7 @@ class KVConflictError(KVStoreError):
         actual_version: Current version/etag observed in storage.
     """
 
-    code = "kv_conflict"
+    default_code = "KV_CONFLICT"
 
     def __init__(
         self,
@@ -82,56 +161,73 @@ class KVConflictError(KVStoreError):
         expected_version: int | None,
         actual_version: int | None,
         *,
-        cause: Exception | None = None,
+        cause: Any | None = None,
     ) -> None:
         super().__init__(
             "KV version conflict for key "
-            f"'{key}' (expected={expected_version}, actual={actual_version})"
+            f"'{key}' (expected={expected_version}, actual={actual_version})",
+            context={
+                "key": key,
+                "expected_version": expected_version,
+                "actual_version": actual_version,
+            },
+            cause=cause,
         )
         self.key = key
         self.expected_version = expected_version
         self.actual_version = actual_version
-        self.cause = cause
 
 
 class KeyNotFoundError(KVStoreError):
     """Raised when a key does not exist in the KV store."""
 
-    def __init__(self, key: str, cause: Exception | None = None) -> None:
-        super().__init__(f"Key not found: {key}")
+    default_code = "KV_KEY_NOT_FOUND"
+
+    def __init__(self, key: str, cause: Any | None = None) -> None:
+        super().__init__(f"Key not found: {key}", context={"key": key}, cause=cause)
         self.key = key
-        self.cause = cause
 
 
 class SerializationError(KVStoreError):
     """Raised when KV data serialization or deserialization fails."""
 
+    default_code = "KV_SERIALIZATION_ERROR"
+
 
 class OverlayError(FsdanticError):
     """Base error for overlay operations."""
+
+    default_code = "OVERLAY_ERROR"
 
 
 class MergeConflictError(OverlayError):
     """Raised when overlay merge conflicts are encountered."""
 
+    default_code = "OVERLAY_CONFLICT"
+
     def __init__(
         self,
         message: str,
         conflicts: list[Any],
-        cause: Exception | None = None,
+        cause: Any | None = None,
     ) -> None:
-        super().__init__(message)
+        super().__init__(message, context={"conflicts": conflicts}, cause=cause)
         self.conflicts = conflicts
-        self.cause = cause
 
 
 class MaterializationError(FsdanticError):
     """Raised when workspace materialization fails."""
 
+    default_code = "MATERIALIZATION_ERROR"
+
 
 class ValidationError(FsdanticError):
     """Raised when data validation fails."""
 
+    default_code = "VALIDATION_ERROR"
+
 
 class ContentSearchError(FsdanticError):
     """Raised when content search operations fail."""
+
+    default_code = "CONTENT_SEARCH_ERROR"

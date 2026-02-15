@@ -255,7 +255,7 @@ class Materializer:
                 return
             errors.append((src_path, str(translate_agentfs_error(e, context))))
             return
-        except Exception as e:
+        except OSError as e:
             errors.append((src_path, str(e)))
             return
 
@@ -313,7 +313,7 @@ class Materializer:
             except ErrnoException as e:
                 context = f"Materializer._copy_recursive(entry_path={entry_path!r})"
                 errors.append((entry_path, str(translate_agentfs_error(e, context))))
-            except Exception as e:
+            except OSError as e:
                 errors.append((entry_path, str(e)))
 
     async def _list_all_files(self, fs: AgentFS, path: str) -> dict[str, int]:
