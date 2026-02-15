@@ -140,12 +140,15 @@ result = await materializer.materialize(
     agent_fs=agent,
     target_path=Path("./workspace"),
     base_fs=stable,
-    clean=True
+    clean=True,
+    allow_root=Path("./")
 )
 
 print(f"Files: {result.files_written}, Bytes: {result.bytes_written}")
 print(f"Errors: {len(result.errors)}")
 ```
+
+**Safety & recovery:** With `clean=True`, materialization first writes into a sibling staging directory and only swaps into `target_path` after success. Invalid/dangerous targets are rejected, staged artifacts are cleaned up best-effort, and any cleanup issues are reported via `MaterializationResult.errors`. On cross-device renames, fsdantic falls back to non-atomic move semantics.
 
 **Benefits:**
 - Base + overlay layering

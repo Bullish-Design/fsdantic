@@ -279,6 +279,65 @@ class TestMaterializerDiff:
 
 
 @pytest.mark.asyncio
+class TestMaterializerSafetyAndSwap:
+    """Test safety validation and staging swap guarantees."""
+
+    async def test_rejects_dangerous_target_paths(self, agent_fs):
+        """Materialization should reject filesystem root targets."""
+        await agent_fs.fs.write_file("/safe.txt", "content")
+        materializer = Materializer()
+
+        with pytest.raises(ValueError, match="filesystem root"):
+            await materializer.materialize(agent_fs, Path("/"))
+
+    async def test_failed_run_does_not_replace_final_output(self, agent_fs, temp_workspace_dir, monkeypatch):
+        """Errors during staging should keep the original target untouched."""
+        target = Path(temp_workspace_dir) / "safe-output"
+        target.mkdir(parents=True)
+        (target / "existing.txt").write_text("original")
+
+        await agent_fs.fs.write_file("/ok.txt", "ok")
+        await agent_fs.fs.write_file("/fail.txt", "fail")
+
+        original_read = agent_fs.fs.read_file
+
+        async def flaky_read(path, encoding="utf-8"):
+            if path == "/fail.txt":
+                raise OSError("simulated read failure")
+            return await original_read(path, encoding=encoding)
+
+        monkeypatch.setattr(agent_fs.fs, "read_file", flaky_read)
+
+        materializer = Materializer()
+        result = await materializer.materialize(agent_fs, target, clean=True)
+
+        assert result.errors
+        assert (target / "existing.txt").read_text() == "original"
+        assert not (target / "ok.txt").exists()
+
+    async def test_swap_replaces_target_and_cleans_temp_paths(self, agent_fs, temp_workspace_dir):
+        """Successful swap should replace target and remove staging artifacts."""
+        parent = Path(temp_workspace_dir)
+        target = parent / "swap-target"
+        target.mkdir(parents=True)
+        (target / "old.txt").write_text("old")
+
+        await agent_fs.fs.write_file("/new.txt", "new")
+
+        materializer = Materializer()
+        result = await materializer.materialize(agent_fs, target, clean=True)
+
+        assert not result.errors
+        assert (target / "new.txt").read_text() == "new"
+        assert not (target / "old.txt").exists()
+
+        leftovers = [
+            p for p in parent.iterdir() if p.name.startswith("swap-target.tmp-") or p.name.startswith("swap-target.bak-")
+        ]
+        assert leftovers == []
+
+
+@pytest.mark.asyncio
 class TestMaterializerProgressCallback:
     """Test progress callback functionality."""
 
