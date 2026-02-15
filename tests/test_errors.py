@@ -1,15 +1,10 @@
-"""Tests for AgentFS-to-fsdantic error translation and decorator behavior."""
+"""Tests for AgentFS-to-fsdantic error translation and structured metadata."""
 
 import asyncio
 
 import pytest
 from agentfs_sdk import ErrnoException
 
-from fsdantic._internal.errors import (
-    ERRNO_EXCEPTION_MAP,
-    handle_agentfs_errors,
-    translate_agentfs_error,
-)
 from fsdantic import (
     DirectoryNotEmptyError,
     FileExistsError,
@@ -20,21 +15,27 @@ from fsdantic import (
     NotADirectoryError,
     PermissionError,
 )
+from fsdantic._internal.errors import (
+    ERRNO_EXCEPTION_MAP,
+    handle_agentfs_errors,
+    translate_agentfs_error,
+)
+from fsdantic.exceptions import FsdanticError
 
 
 @pytest.mark.parametrize(
-    ("code", "expected_type"),
+    ("code", "expected_type", "expected_error_code"),
     [
-        ("ENOENT", FileNotFoundError),
-        ("EEXIST", FileExistsError),
-        ("ENOTDIR", NotADirectoryError),
-        ("EISDIR", IsADirectoryError),
-        ("ENOTEMPTY", DirectoryNotEmptyError),
-        ("EPERM", PermissionError),
-        ("EINVAL", InvalidPathError),
+        ("ENOENT", FileNotFoundError, "FS_NOT_FOUND"),
+        ("EEXIST", FileExistsError, "FS_ALREADY_EXISTS"),
+        ("ENOTDIR", NotADirectoryError, "FS_NOT_A_DIRECTORY"),
+        ("EISDIR", IsADirectoryError, "FS_IS_A_DIRECTORY"),
+        ("ENOTEMPTY", DirectoryNotEmptyError, "FS_DIRECTORY_NOT_EMPTY"),
+        ("EPERM", PermissionError, "FS_PERMISSION_DENIED"),
+        ("EINVAL", InvalidPathError, "FS_INVALID_PATH"),
     ],
 )
-def test_per_errno_mappings(code, expected_type):
+def test_per_errno_mappings(code, expected_type, expected_error_code):
     error = ErrnoException(code=code, syscall="stat", path="/tmp/x", message="boom")
 
     translated = translate_agentfs_error(error, context="op")
@@ -42,7 +43,24 @@ def test_per_errno_mappings(code, expected_type):
     assert isinstance(translated, expected_type)
     assert translated.path == "/tmp/x"
     assert translated.cause is error
+    assert translated.code == expected_error_code
     assert str(translated).startswith("op:")
+
+
+def test_fsdantic_error_to_dict_and_safe_context():
+    error = FsdanticError(
+        "top-level failed",
+        code="GENERIC_FAILURE",
+        context={"payload": b"abc", "nested": {"ok": True}},
+    )
+
+    payload = error.to_dict()
+
+    assert payload["type"] == "FsdanticError"
+    assert payload["message"] == "top-level failed"
+    assert payload["code"] == "GENERIC_FAILURE"
+    assert payload["context"]["payload"] == "<bytes:3>"
+    assert payload["context"]["nested"]["ok"] is True
 
 
 def test_per_errno_mapping_covers_every_required_code_once():
@@ -74,29 +92,48 @@ def test_mapping_matrix_coverage_is_strict():
 
 
 @pytest.mark.parametrize(
-    ("code", "expected_type"),
+    ("code", "expected_type", "expected_error_code"),
     [
-        ("ENOENT", FileNotFoundError),
-        ("EEXIST", FileExistsError),
-        ("ENOTDIR", NotADirectoryError),
-        ("EISDIR", IsADirectoryError),
-        ("ENOTEMPTY", DirectoryNotEmptyError),
-        ("EPERM", PermissionError),
-        ("EINVAL", InvalidPathError),
-        ("ENOSYS", FileSystemError),
-        ("UNKNOWN", FileSystemError),
-        ("", FileSystemError),
+        ("ENOENT", FileNotFoundError, "FS_NOT_FOUND"),
+        ("EEXIST", FileExistsError, "FS_ALREADY_EXISTS"),
+        ("ENOTDIR", NotADirectoryError, "FS_NOT_A_DIRECTORY"),
+        ("EISDIR", IsADirectoryError, "FS_IS_A_DIRECTORY"),
+        ("ENOTEMPTY", DirectoryNotEmptyError, "FS_DIRECTORY_NOT_EMPTY"),
+        ("EPERM", PermissionError, "FS_PERMISSION_DENIED"),
+        ("EINVAL", InvalidPathError, "FS_INVALID_PATH"),
+        ("ENOSYS", FileSystemError, "FS_ERROR"),
+        ("UNKNOWN", FileSystemError, "FS_ERROR"),
+        ("", FileSystemError, "FS_ERROR"),
     ],
 )
-def test_translation_matrix_with_unknown_fallback(code, expected_type):
+def test_translation_matrix_with_unknown_fallback(code, expected_type, expected_error_code):
     error = ErrnoException(code=code, syscall="open", path="/data.txt", message="bad")
 
     translated = translate_agentfs_error(error)
 
     assert isinstance(translated, expected_type)
+    assert translated.code == expected_error_code
     if expected_type is FileSystemError:
         assert translated.path == "/data.txt"
         assert translated.cause is error
+
+
+def test_translation_context_is_consistent_with_decorator():
+    error = ErrnoException("ENOENT", "open", path="/missing", message="not found")
+
+    direct = translate_agentfs_error(error, context="raises_errno")
+
+    @handle_agentfs_errors
+    async def raises_errno():
+        raise error
+
+    with pytest.raises(FileNotFoundError) as exc_info:
+        asyncio.run(raises_errno())
+
+    decorated = exc_info.value
+    assert decorated.code == direct.code
+    assert decorated.path == direct.path
+    assert decorated.context == direct.context
 
 
 def test_decorator_chains_cause():
@@ -151,6 +188,7 @@ def test_key_structured_field():
 
     exc = KeyNotFoundError("config:missing")
     assert exc.key == "config:missing"
+    assert exc.code == "KV_KEY_NOT_FOUND"
 
 
 def test_conflict_structured_field():
@@ -159,6 +197,7 @@ def test_conflict_structured_field():
     conflicts = [{"path": "/a.txt"}]
     exc = MergeConflictError("merge failed", conflicts=conflicts)
     assert exc.conflicts == conflicts
+    assert exc.code == "OVERLAY_CONFLICT"
 
 
 def test_malformed_error_object_missing_all_fields():
@@ -184,4 +223,4 @@ def test_malformed_error_object_partial_fields():
 
     assert isinstance(translated, FileExistsError)
     assert translated.path == "/tmp/file"
-    assert str(translated) == "broken string"
+    assert "broken string" in str(translated)

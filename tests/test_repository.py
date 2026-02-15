@@ -226,7 +226,7 @@ class TestTypedKVRepository:
         with pytest.raises(KVConflictError) as exc_info:
             await repo.save("app", stale)
 
-        assert exc_info.value.code == "kv_conflict"
+        assert exc_info.value.code == "KV_CONFLICT"
         assert exc_info.value.expected_version == 1
         assert exc_info.value.actual_version == 2
 

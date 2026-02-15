@@ -132,7 +132,7 @@ class OverlayOperations:
                 return MergeResult(files_merged=0, conflicts=conflicts, errors=errors)
             errors.append((path, str(translate_agentfs_error(e, context))))
             return MergeResult(files_merged=0, conflicts=conflicts, errors=errors)
-        except Exception as e:
+        except (RuntimeError, TypeError, ValueError) as e:
             errors.append((path, str(e)))
             return MergeResult(files_merged=0, conflicts=conflicts, errors=errors)
 
@@ -182,7 +182,7 @@ class OverlayOperations:
                 return
             errors.append((path, str(translate_agentfs_error(e, context))))
             return
-        except Exception as e:
+        except (RuntimeError, TypeError, ValueError) as e:
             errors.append((path, str(e)))
             return
 
@@ -224,7 +224,7 @@ class OverlayOperations:
                         errors,
                     )
 
-            except Exception as e:
+            except (RuntimeError, TypeError, ValueError) as e:
                 errors.append((source_path, str(e)))
 
     async def _merge_file(
@@ -283,7 +283,7 @@ class OverlayOperations:
         except ErrnoException as e:
             context = f"OverlayOperations._merge_file(path={source_path!r})"
             errors.append((source_path, str(translate_agentfs_error(e, context))))
-        except Exception as e:
+        except (RuntimeError, TypeError, ValueError) as e:
             errors.append((source_path, str(e)))
 
     async def list_changes(self, overlay: AgentFS, path: str = "/") -> list[str]:
@@ -374,7 +374,7 @@ class OverlayOperations:
                     continue
                 context = f"OverlayOperations.reset_overlay(path={path!r})"
                 errors.append((path, str(translate_agentfs_error(e, context))))
-            except Exception as e:
+            except (RuntimeError, TypeError, ValueError) as e:
                 errors.append((path, str(e)))
 
         if errors:

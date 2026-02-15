@@ -8,9 +8,9 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
-from agentfs_sdk import AgentFS
+from agentfs_sdk import AgentFS, ErrnoException
 
-from .exceptions import KVStoreError, KeyNotFoundError, SerializationError
+from .exceptions import FsdanticError, KVStoreError, KeyNotFoundError, SerializationError
 from .models import BatchItemResult, BatchResult
 
 if TYPE_CHECKING:
@@ -98,7 +98,7 @@ class KVTransaction:
                     await self._manager.delete(staged.key)
 
                 applied.append((staged, existed, old_value))
-        except Exception as exc:
+        except (FsdanticError, ErrnoException, TypeError, ValueError) as exc:
             rollback_errors: list[str] = []
             for staged, existed, old_value in reversed(applied):
                 try:
@@ -106,7 +106,13 @@ class KVTransaction:
                         await self._manager.set(staged.key, old_value)
                     else:
                         await self._manager.delete(staged.key)
-                except Exception as rollback_exc:  # pragma: no cover - defensive
+                except (
+                    FsdanticError,
+                    ErrnoException,
+                    RuntimeError,
+                    TypeError,
+                    ValueError,
+                ) as rollback_exc:  # pragma: no cover - defensive
                     rollback_errors.append(
                         f"key={staged.key}: {rollback_exc}"
                     )
@@ -202,7 +208,7 @@ class KVManager:
         qualified_key = self._qualify_key(key)
         try:
             value = await self._agent_fs.kv.get(qualified_key)
-        except Exception as exc:
+        except (TypeError, ValueError) as exc:
             raise SerializationError(
                 f"KV deserialization failed during get for key='{qualified_key}' "
                 f"(prefix='{self._prefix}')"
@@ -213,7 +219,7 @@ class KVManager:
 
         try:
             matched = await self._agent_fs.kv.list(prefix=qualified_key)
-        except Exception as exc:
+        except (ErrnoException, RuntimeError) as exc:
             raise KVStoreError(
                 f"KV operation=get-check-missing failed for key='{qualified_key}' "
                 f"(prefix='{self._prefix}')"
@@ -240,7 +246,7 @@ class KVManager:
                 f"KV serialization failed during set for key='{qualified_key}' "
                 f"(prefix='{self._prefix}')"
             ) from exc
-        except Exception as exc:
+        except (ErrnoException, RuntimeError) as exc:
             raise KVStoreError(
                 f"KV operation=set failed for key='{qualified_key}' "
                 f"(prefix='{self._prefix}')"
@@ -257,7 +263,7 @@ class KVManager:
         qualified_key = self._qualify_key(key)
         try:
             matched = await self._agent_fs.kv.list(prefix=qualified_key)
-        except Exception as exc:
+        except (ErrnoException, RuntimeError) as exc:
             raise KVStoreError(
                 f"KV operation=delete-check-exists failed for key='{qualified_key}' "
                 f"(prefix='{self._prefix}')"
@@ -269,7 +275,7 @@ class KVManager:
 
         try:
             await self._agent_fs.kv.delete(qualified_key)
-        except Exception as exc:
+        except (ErrnoException, RuntimeError) as exc:
             raise KVStoreError(
                 f"KV operation=delete failed for key='{qualified_key}' "
                 f"(prefix='{self._prefix}')"
@@ -290,7 +296,7 @@ class KVManager:
             try:
                 value = await self.get(key, default=default)
                 return BatchItemResult(index=index, key_or_path=key, ok=True, value=value)
-            except Exception as exc:  # pragma: no cover - defensive fallback
+            except (FsdanticError, TypeError, ValueError) as exc:  # pragma: no cover - defensive fallback
                 return BatchItemResult(index=index, key_or_path=key, ok=False, error=str(exc))
 
         gathered = await asyncio.gather(
@@ -326,7 +332,7 @@ class KVManager:
                 try:
                     await self.set(key, value)
                     return BatchItemResult(index=index, key_or_path=key, ok=True, value=True)
-                except Exception as exc:  # pragma: no cover - defensive fallback
+                except (FsdanticError, TypeError, ValueError) as exc:  # pragma: no cover - defensive fallback
                     return BatchItemResult(index=index, key_or_path=key, ok=False, error=str(exc))
 
         gathered = await asyncio.gather(
@@ -357,7 +363,7 @@ class KVManager:
                 try:
                     deleted = await self.delete(key)
                     return BatchItemResult(index=index, key_or_path=key, ok=True, value=deleted)
-                except Exception as exc:  # pragma: no cover - defensive fallback
+                except FsdanticError as exc:  # pragma: no cover - defensive fallback
                     return BatchItemResult(index=index, key_or_path=key, ok=False, error=str(exc))
 
         gathered = await asyncio.gather(
