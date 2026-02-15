@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
@@ -17,6 +18,109 @@ if TYPE_CHECKING:
 
 
 _MISSING = object()
+
+
+@dataclass(slots=True)
+class _StagedOperation:
+    op: str
+    key: str
+    value: Any = None
+
+
+class KVTransaction:
+    """Best-effort transaction for grouped KV operations.
+
+    Operations are staged in memory and applied at commit time.
+
+    Atomicity/rollback semantics:
+    - If the backend supports real transactions natively, callers should prefer
+      those primitives directly.
+    - This abstraction performs **best-effort rollback** only: if commit fails
+      midway, fsdantic attempts to undo already-applied operations in reverse
+      order.
+    - Rollback itself can fail due to backend errors; in that case a
+      ``KVStoreError`` is raised describing that both commit and rollback had
+      errors and manual reconciliation may be required.
+    """
+
+    def __init__(self, manager: "KVManager") -> None:
+        self._manager = manager
+        self._staged: dict[str, _StagedOperation] = {}
+        self._committed = False
+
+    async def __aenter__(self) -> "KVTransaction":
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        if exc is not None:
+            self._staged.clear()
+            return False
+        await self.commit()
+        return False
+
+    def _stage(self, op: str, key: str, value: Any = None) -> None:
+        self._staged[key] = _StagedOperation(op=op, key=key, value=value)
+
+    async def set(self, key: str, value: Any) -> None:
+        """Stage a set operation."""
+        self._stage("set", key, value)
+
+    async def delete(self, key: str) -> None:
+        """Stage a delete operation."""
+        self._stage("delete", key)
+
+    async def get(self, key: str, default: Any = _MISSING) -> Any:
+        """Read through staged state, falling back to the underlying KV manager."""
+        staged = self._staged.get(key)
+        if staged is not None:
+            if staged.op == "delete":
+                if default is not _MISSING:
+                    return default
+                raise KeyNotFoundError(self._manager._qualify_key(key))
+            return staged.value
+        return await self._manager.get(key, default=default)
+
+    async def commit(self) -> None:
+        """Apply staged operations and best-effort rollback on failure."""
+        if self._committed:
+            return
+
+        applied: list[tuple[_StagedOperation, bool, Any]] = []
+
+        try:
+            for staged in self._staged.values():
+                old_value = await self._manager.get(staged.key, default=_MISSING)
+                existed = old_value is not _MISSING
+
+                if staged.op == "set":
+                    await self._manager.set(staged.key, staged.value)
+                else:
+                    await self._manager.delete(staged.key)
+
+                applied.append((staged, existed, old_value))
+        except Exception as exc:
+            rollback_errors: list[str] = []
+            for staged, existed, old_value in reversed(applied):
+                try:
+                    if existed:
+                        await self._manager.set(staged.key, old_value)
+                    else:
+                        await self._manager.delete(staged.key)
+                except Exception as rollback_exc:  # pragma: no cover - defensive
+                    rollback_errors.append(
+                        f"key={staged.key}: {rollback_exc}"
+                    )
+
+            if rollback_errors:
+                raise KVStoreError(
+                    "KV transaction commit failed and rollback was partial; "
+                    "manual reconciliation may be required"
+                ) from exc
+
+            raise KVStoreError("KV transaction commit failed; applied changes were rolled back") from exc
+
+        self._committed = True
+        self._staged.clear()
 
 
 class KVManager:
@@ -78,6 +182,10 @@ class KVManager:
     def _qualify_key(self, key: str) -> str:
         """Return the fully-qualified KV key for this manager namespace."""
         return f"{self._prefix}{key}"
+
+    def transaction(self) -> KVTransaction:
+        """Create a best-effort transaction context for grouped KV operations."""
+        return KVTransaction(self)
 
     async def get(self, key: str, default: Any = _MISSING) -> Any:
         """Get a value by key using simple KV semantics.
@@ -168,13 +276,12 @@ class KVManager:
             ) from exc
         return True
 
-
     async def get_many(self, keys: list[str], *, default: Any = _MISSING) -> BatchResult:
         """Get many keys with deterministic ordering and per-item outcomes.
 
-        The returned ``BatchResult.items`` order always matches ``keys``.
-        Missing keys produce failures when ``default`` is omitted and successes
-        with ``value=default`` when ``default`` is provided.
+        The return order exactly matches the input order. Missing keys are
+        failures when ``default`` is omitted and successes with ``value=default``
+        when ``default`` is provided.
         """
         if not keys:
             return BatchResult()

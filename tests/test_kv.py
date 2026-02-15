@@ -184,6 +184,31 @@ async def test_get_malformed_payload_wraps_operation_key_and_cause() -> None:
     assert "bad json" in str(exc_info.value.__cause__)
 
 
+
+
+@pytest.mark.asyncio
+async def test_transaction_commit_applies_staged_writes() -> None:
+    manager = KVManager(FakeAgentFS(), prefix="app:")
+
+    async with manager.transaction() as txn:
+        await txn.set("one", 1)
+        await txn.set("two", 2)
+
+    assert await manager.get("one") == 1
+    assert await manager.get("two") == 2
+
+
+@pytest.mark.asyncio
+async def test_transaction_best_effort_rollback_on_partial_failure() -> None:
+    manager = KVManager(FakeAgentFS())
+
+    with pytest.raises(KVStoreError, match="rolled back"):
+        async with manager.transaction() as txn:
+            await txn.set("ok:key", {"ok": True})
+            await txn.set("fail:set:key", {"boom": True})
+
+    assert await manager.exists("ok:key") is False
+
 @pytest.mark.asyncio
 async def test_wrapped_store_error_context_includes_operation_key_and_cause() -> None:
     manager = KVManager(FakeAgentFS())

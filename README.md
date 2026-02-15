@@ -113,6 +113,14 @@ repo = workspace.kv.repository(prefix="users:", model_type=User)
 await repo.save("bob", User(name="Bob", role="dev"))
 bob = await repo.load("bob")
 all_users = await repo.list_all()
+
+# grouped operations with best-effort transaction semantics
+async with workspace.kv.transaction() as txn:
+    await txn.set("users:count", 42)
+    await txn.delete("users:legacy")
+
+# optimistic concurrency (additive APIs)
+await repo.compare_and_set("bob", User(name="Bob", role="lead"), etag="1")
 ```
 
 ### 2.5) Batch APIs (deterministic ordering + partial failures)
@@ -140,6 +148,21 @@ repo_result = await repo.load_many(["alice", "bob"], default=None)
 Batch APIs return per-item outcomes instead of all-or-nothing behavior.
 Successful and failed items are returned together in input order, so callers can
 retry only failed items by filtering ``result.items`` where ``ok`` is ``False``.
+
+
+### 2.6) KV consistency guarantees: atomic vs best-effort
+
+- **Single-key KV writes** (`set`, `delete`, repository `save`) are atomic at the
+  backend key level.
+- **Grouped writes via `KVTransaction`** are **best-effort**, not fully atomic:
+  operations are staged in memory, then committed in order on context exit.
+  If a later write fails, fsdantic attempts rollback of already-applied writes.
+  Rollback can also fail, so callers should treat grouped commits as
+  compensation-based and idempotency-friendly.
+- **Optimistic concurrency** is available via repository `expected_version`/`etag`
+  checks and additive methods (`save_if_version`, `compare_and_set`).
+  Conflicts raise `KVConflictError` with `code`, `key`, `expected_version`, and
+  `actual_version` for machine-readable handling.
 
 ### 3) Overlay operations
 

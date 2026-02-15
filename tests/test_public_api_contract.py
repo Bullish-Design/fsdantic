@@ -48,6 +48,7 @@ def test___all___exact_expected_exports() -> None:
         "FileManager",
         "FileQuery",
         "KVManager",
+        "KVTransaction",
         # Exceptions
         "FsdanticError",
         "FileSystemError",
@@ -58,6 +59,7 @@ def test___all___exact_expected_exports() -> None:
         "DirectoryNotEmptyError",
         "PermissionError",
         "InvalidPathError",
+        "KVConflictError",
         "KVStoreError",
         "KeyNotFoundError",
         "SerializationError",
