@@ -56,7 +56,7 @@ from .repository import NamespacedKVStore, TypedKVRepository
 from .workspace import Workspace
 from .view import SearchMatch, View, ViewQuery
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 __all__ = [
     # Primary API

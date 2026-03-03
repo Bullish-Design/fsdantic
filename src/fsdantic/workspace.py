@@ -1,11 +1,18 @@
 """Workspace façade around AgentFS with lazy manager loading."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from agentfs_sdk import AgentFS
 
 from .files import FileManager
 from .kv import KVManager
 from .materialization import MaterializationManager
 from .overlay import OverlayManager
+
+if TYPE_CHECKING:
+    from turso.aio import Connection as TursoConnection
 
 
 class Workspace:
@@ -23,6 +30,17 @@ class Workspace:
     def raw(self) -> AgentFS:
         """Expose the underlying AgentFS instance."""
         return self._raw
+
+    @property
+    def connection(self) -> TursoConnection:
+        """Expose the underlying database connection.
+
+        This is the public accessor for the turso ``Connection`` backing
+        this workspace.  Useful for running PRAGMAs, inspecting journal
+        mode, or performing advanced operations (e.g. ``BEGIN CONCURRENT``
+        under MVCC).
+        """
+        return self._raw.get_database()
 
     @property
     def files(self) -> FileManager:
