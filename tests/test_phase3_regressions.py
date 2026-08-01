@@ -37,6 +37,12 @@ class ByteRecord(BaseModel):
     payload: bytes
 
 
+class PlainRecord(BaseModel):
+    """Simple non-versioned record for batch integrity tests."""
+
+    value: str
+
+
 class EnumRecord(BaseModel):
     """Model with an enum and a Path field."""
 
@@ -88,6 +94,46 @@ class TestMissingKeyConstantTime:
         await kv.set("k", {"v": 1})
         assert await kv.get("k") == {"v": 1}
         assert await kv.get("k2", default=None) is None
+
+
+@pytest.mark.asyncio
+class TestConcurrentDeleteIntegrity:
+    """M5 regression: concurrent deletes must not be silently lost.
+
+    pyturso leaves an implicit read transaction open when a ``fetchone()``
+    returns a row (the statement is not finalized).  The O(1) existence
+    helpers must exhaust their SELECT with ``fetchall()`` so interleaved
+    DELETE+commit pairs on the shared connection are never lost.
+    """
+
+    async def test_delete_many_concurrent_no_lost_deletes(self, agent_fs):
+        repo = TypedKVRepository[PlainRecord](agent_fs, prefix="test:")
+        for i in range(10):
+            await repo.save(f"r{i}", PlainRecord(value=str(i)))
+
+        # Delete every even key concurrently, several times, to widen the
+        # interleaving window.
+        for _ in range(5):
+            result = await repo.delete_many([f"r{i}" for i in range(0, 10, 2)])
+            assert all(item.ok for item in result.items)
+
+        remaining = await repo.list_ids()
+        assert sorted(remaining) == [f"r{i}" for i in range(1, 10, 2)], (
+            f"lost deletes; remaining={sorted(remaining)}"
+        )
+
+    async def test_key_exists_does_not_leak_read_transaction(self, agent_fs):
+        """A key_exists() call followed by a write must not leak a read txn."""
+        from fsdantic._internal.kv_cas import key_exists
+
+        kv = KVManager(agent_fs)
+        await kv.set("k", 1)
+        conn = agent_fs.get_database()
+
+        assert await key_exists(conn, "k") is True
+        # A write immediately after the existence check must persist.
+        await kv.set("k", 2)
+        assert await kv.get("k") == 2
 
 
 @pytest.mark.asyncio

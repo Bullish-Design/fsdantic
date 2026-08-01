@@ -76,14 +76,29 @@ async def cas_update(conn: Connection, key: str, expected_raw: str, new_raw: str
 
 
 async def key_exists(conn: Connection, key: str) -> bool:
-    """O(1) existence check.  True when the key has a row, regardless of value."""
+    """O(1) existence check.  True when the key has a row, regardless of value.
+
+    Important: results are consumed with ``fetchall()``, NOT ``fetchone()``.
+    In pyturso, a ``fetchone()`` that returns a row leaves the statement
+    active (``Status.Row``), which holds an implicit READ transaction open
+    on the connection; a subsequent interleaved DELETE+commit on the same
+    connection can then be silently lost.  ``fetchall()`` exhausts the
+    statement, which finalizes it and releases the read transaction.
+    """
     cursor = await conn.execute("SELECT 1 FROM kv_store WHERE key = ?", (key,))
-    row = await cursor.fetchone()
-    return row is not None
+    rows = await cursor.fetchall()
+    return len(rows) > 0
 
 
 async def get_raw(conn: Connection, key: str) -> str | None:
-    """Return the raw JSON text for ``key``, or ``None`` when missing."""
+    """Return the raw JSON text for ``key``, or ``None`` when missing.
+
+    Uses ``fetchall()`` for the same cursor-finalization reason as
+    :func:`key_exists` (pyturso leaves a read transaction open when a
+    ``fetchone()`` returns a row).
+    """
     cursor = await conn.execute("SELECT value FROM kv_store WHERE key = ?", (key,))
-    row = await cursor.fetchone()
-    return row[0] if row is not None else None
+    rows = await cursor.fetchall()
+    if not rows:
+        return None
+    return rows[0][0]

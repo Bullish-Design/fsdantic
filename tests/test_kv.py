@@ -52,6 +52,9 @@ class FakeCursor:
     async def fetchone(self) -> Any:
         return self._row
 
+    async def fetchall(self) -> list[Any]:
+        return [self._row] if self._row is not None else []
+
 
 class FakeConnection:
     """Minimal stand-in for the turso Connection on a fake backend.
