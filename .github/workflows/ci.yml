@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 1"  # weekly benchmark regression check
+
+jobs:
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install ruff
+        run: pip install ruff
+      - name: Check
+        run: ruff check src/ && ruff format --check src/
+
+  test:
+    name: Tests (default gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install 'pydantic>=2.0.0' 'pyturso==0.4.4' pytest pytest-asyncio pytest-cov hypothesis
+          pip install -e .context/agentfs-main/sdk/python
+          pip install -e .
+      # Default gate excludes slow/benchmark tests (timing-sensitive);
+      # see scripts/phase8_quality_gate_1.py for the canonical stage list.
+      - name: Run test suite
+        run: python -m pytest -q -m "not slow and not benchmark" -p no:cacheprovider --no-cov
+
+  property:
+    name: Property suite (slow)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install 'pydantic>=2.0.0' 'pyturso==0.4.4' pytest pytest-asyncio hypothesis
+          pip install -e .context/agentfs-main/sdk/python
+          pip install -e .
+      - name: Run property suite
+        run: python -m pytest -q tests/test_property_based.py -p no:cacheprovider --no-cov
+
+  benchmark:
+    name: Benchmarks (opt-in)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install 'pydantic>=2.0.0' 'pyturso==0.4.4' pytest pytest-asyncio
+          pip install -e .context/agentfs-main/sdk/python
+          pip install -e .
+      # Absolute thresholds are machine-specific; record the artifact and
+      # compare deltas against tests/performance_baseline.json.
+      - name: Run benchmarks
+        env:
+          FSDANTIC_RUN_BENCHMARKS: "1"
+          FSDANTIC_BENCHMARK_OUTPUT: performance_current.json
+        run: python -m pytest -q tests/test_performance.py -p no:cacheprovider --no-cov
+      - name: Upload benchmark artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-current
+          path: performance_current.json
