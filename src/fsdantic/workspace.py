@@ -77,7 +77,7 @@ class Workspace:
         await self._raw.close()
         self._closed = True
 
-    async def __aenter__(self) -> "Workspace":
+    async def __aenter__(self) -> Workspace:
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:

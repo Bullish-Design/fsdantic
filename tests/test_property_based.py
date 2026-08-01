@@ -9,9 +9,15 @@ import tempfile
 
 import pytest
 from agentfs_sdk import AgentFS, AgentFSOptions as SDKAgentFSOptions
-from hypothesis import given, strategies as st
+from hypothesis import given, settings, strategies as st
 
 from fsdantic import AgentFSOptions, ViewQuery
+
+# SQLite-backed hypothesis examples routinely exceed hypothesis's 200ms
+# deadline under load.  Disable the deadline so the property suite gates on
+# correctness, not machine timing (see PHASE_5 L18).
+settings.register_profile("fsdantic-ci", deadline=None)
+settings.load_profile("fsdantic-ci")
 
 
 valid_segment_strategy = st.text(

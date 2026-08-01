@@ -22,6 +22,18 @@ from fsdantic import View, ViewQuery
 STRICT_BENCHMARKS = os.getenv("FSDANTIC_STRICT_BENCHMARKS", "0") == "1"
 BENCHMARK_OUTPUT_PATH = os.getenv("FSDANTIC_BENCHMARK_OUTPUT")
 
+# Benchmarks are opt-in: the default suite excludes them (L18).  Enable with
+# FSDANTIC_RUN_BENCHMARKS=1 (or FSDANTIC_STRICT_BENCHMARKS=1 for the strict
+# timing gates).  Absolute thresholds are machine-specific; gate on regression
+# deltas against the recorded artifact instead.
+RUN_BENCHMARKS = STRICT_BENCHMARKS or os.getenv("FSDANTIC_RUN_BENCHMARKS", "0") == "1"
+
+
+SKIP_BENCHMARKS = pytest.mark.skipif(
+    not RUN_BENCHMARKS,
+    reason="timing benchmarks are opt-in (FSDANTIC_RUN_BENCHMARKS=1 or FSDANTIC_STRICT_BENCHMARKS=1)",
+)
+
 
 @pytest.fixture
 async def perf_agent():
@@ -128,12 +140,14 @@ class TestPerformanceCorrectness:
 
 @pytest.mark.benchmark
 @pytest.mark.slow
+@SKIP_BENCHMARKS
 @pytest.mark.asyncio
 class TestMicrobenchmarks:
-    """Environment-sensitive microbenchmarks.
+    """Environment-sensitive microbenchmarks (opt-in).
 
-    These tests are marked benchmark/slow so teams can exclude them by default:
-      pytest -m "not benchmark"
+    Skipped by default; enable with ``FSDANTIC_RUN_BENCHMARKS=1`` (loose
+    bounds) or ``FSDANTIC_STRICT_BENCHMARKS=1`` (tight CI bounds).  Thresholds
+    are machine-specific; use the recorded artifact for regression deltas.
     """
 
     async def test_file_write_average_latency(self, perf_agent):
@@ -149,7 +163,10 @@ class TestMicrobenchmarks:
         )
         _record_benchmark_metric("file_write_average_latency", median_ms)
 
-        target_ms = _target(default_ms=25.0, strict_ms=10.0)
+        # Non-strict default bound is environment-tolerant (SQLite write
+        # latency spikes with checkpoint flushes); strict mode keeps the
+        # tight CI gate.
+        target_ms = _target(default_ms=250.0, strict_ms=10.0)
         assert avg_ms < target_ms, (
             f"Average write latency {avg_ms:.2f}ms exceeded target {target_ms:.2f}ms "
             f"(strict={STRICT_BENCHMARKS})"
@@ -171,7 +188,7 @@ class TestMicrobenchmarks:
         )
         _record_benchmark_metric("file_read_average_latency", median_ms)
 
-        target_ms = _target(default_ms=25.0, strict_ms=10.0)
+        target_ms = _target(default_ms=250.0, strict_ms=10.0)
         assert avg_ms < target_ms, (
             f"Average read latency {avg_ms:.2f}ms exceeded target {target_ms:.2f}ms "
             f"(strict={STRICT_BENCHMARKS})"
@@ -197,7 +214,11 @@ class TestMicrobenchmarks:
         _record_benchmark_metric("view_query_without_content_latency", duration_ms)
 
         assert len(files) == 1500
-        target_ms = _target(default_ms=600.0, strict_ms=150.0)
+        # Non-strict (default) mode uses a generous environment-tolerant bound:
+        # absolute numbers vary with machine and filesystem; regression gating
+        # should compare against the recorded artifact instead.  Strict mode
+        # (FSDANTIC_STRICT_BENCHMARKS=1) keeps the tight target for CI gates.
+        target_ms = _target(default_ms=3000.0, strict_ms=150.0)
         assert duration_ms < target_ms, (
             f"View query (metadata only) took {duration_ms:.2f}ms, target {target_ms:.2f}ms "
             f"(strict={STRICT_BENCHMARKS})"
@@ -219,7 +240,9 @@ class TestMicrobenchmarks:
         _record_benchmark_metric("view_count_latency", duration_ms)
 
         assert count == 2000
-        target_ms = _target(default_ms=700.0, strict_ms=200.0)
+        # See test_view_query_without_content_latency: generous default bound,
+        # tight strict bound for CI regression gating.
+        target_ms = _target(default_ms=3000.0, strict_ms=200.0)
         assert duration_ms < target_ms, (
             f"View.count() took {duration_ms:.2f}ms, target {target_ms:.2f}ms "
             f"(strict={STRICT_BENCHMARKS})"

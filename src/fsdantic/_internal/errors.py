@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import functools
 from collections.abc import Awaitable, Callable
-from typing import Any, ParamSpec, TypeVar
+from typing import Any
 
 from agentfs_sdk import ErrnoException
 
@@ -60,11 +60,7 @@ def translate_agentfs_error(error: Any, context: str = "") -> FsdanticError:
     )
 
 
-P = ParamSpec("P")
-R = TypeVar("R")
-
-
-def handle_agentfs_errors(
+def handle_agentfs_errors[P, R](
     func: Callable[P, Awaitable[R]],
 ) -> Callable[P, Awaitable[R]]:
     """Decorator for async methods that translates AgentFS ErrnoException errors."""

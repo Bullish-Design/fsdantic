@@ -3,7 +3,7 @@
 FileManager in ``fsdantic.files`` is the primary public API.
 """
 
-from typing import Any, Optional
+from typing import Any
 
 from agentfs_sdk import AgentFS
 
@@ -13,10 +13,10 @@ from .files import FileManager
 class FileOperations(FileManager):
     """Deprecated alias for FileManager."""
 
-    def __init__(self, agent_fs: AgentFS, base_fs: Optional[AgentFS] = None):
+    def __init__(self, agent_fs: AgentFS, base_fs: AgentFS | None = None):
         super().__init__(agent_fs, base_fs)
 
-    async def read_file(self, path: str, *, encoding: Optional[str] = "utf-8") -> str | bytes:
+    async def read_file(self, path: str, *, encoding: str | None = "utf-8") -> str | bytes:
         if encoding is None:
             return await self.read(path, mode="binary", encoding=None)
         return await self.read(path, mode="text", encoding=encoding)

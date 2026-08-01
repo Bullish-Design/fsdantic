@@ -141,7 +141,13 @@ class PermissionError(FileSystemError):
 
 
 class InvalidPathError(FileSystemError):
-    """Raised when a provided filesystem path is invalid."""
+    """Raised when a provided filesystem path is invalid.
+
+    May also be raised for invalid-argument conditions (``EINVAL``), which
+    the AgentFS SDK reports for semantic errors (e.g. renaming a directory
+    into its own subtree) as well as malformed paths.  The translated error
+    ``context`` includes the syscall and agentfs code for disambiguation.
+    """
 
     default_code = "FS_INVALID_PATH"
 
@@ -173,8 +179,7 @@ class KVConflictError(KVStoreError):
         cause: Any | None = None,
     ) -> None:
         super().__init__(
-            "KV version conflict for key "
-            f"'{key}' (expected={expected_version}, actual={actual_version})",
+            f"KV version conflict for key '{key}' (expected={expected_version}, actual={actual_version})",
             context={
                 "key": key,
                 "expected_version": expected_version,

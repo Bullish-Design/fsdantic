@@ -59,6 +59,13 @@ def normalize_path(
     - Resolve '.' and '..' segments
     - Return absolute paths by default
     - Strip trailing slash except for root
+
+    Dot-dot semantics:
+    - With ``absolute=True`` (the default), the input is treated as absolute
+      and leading ``..`` segments collapse away (``normalize_path("..")``
+      -> ``"/"``).
+    - With ``absolute=False``, relative inputs preserve leading ``..``
+      (``normalize_path("../x", absolute=False)`` -> ``"../x"``).
     """
     normalized = collapse_duplicate_slashes(normalize_separators(path.strip()))
     is_absolute = normalized.startswith("/")

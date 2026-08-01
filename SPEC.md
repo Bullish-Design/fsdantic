@@ -1,7 +1,7 @@
 # Fsdantic Technical Specification
 
-**Version:** 0.3.0
-**Date:** 2026-02-14
+**Version:** 0.4.0
+**Date:** 2026-08-01
 **Status:** Active Development
 
 ---
@@ -83,7 +83,9 @@ fsdantic/
   - `status: ToolCallStatus` - Call status (pending/success/error)
   - `started_at: datetime` - Start timestamp
   - `completed_at: Optional[datetime]` - Completion timestamp
-- Computed: `duration_ms` - Call duration in milliseconds
+  - `duration_ms: Optional[float]` - Call duration in milliseconds; explicit,
+    or derived from `started_at`/`completed_at` at construction (0.4.0: a
+    plain field — serialization emits exactly one duration key; L4)
 
 **KVEntry**
 - Purpose: Key-value store entry
@@ -198,17 +200,30 @@ def __init__(
 ```
 
 **Methods:**
-- `save(id: str, record: T) -> None` - Save record
+- `save(id: str, record: T, *, expected_version?, etag?) -> None` - Save record
+- `save_many(records, *, concurrency_limit=10) -> BatchResult` - Save records (versioned)
 - `load(id: str, model_type: Type[T]) -> Optional[T]` - Load record
 - `delete(id: str) -> None` - Delete record
 - `list_all(model_type: Type[T]) -> list[T]` - List all records
 - `exists(id: str) -> bool` - Check if record exists
 - `list_ids() -> list[str]` - List all record IDs
 
-**Implementation Details:**
-- Uses AgentFS KV store `set()` and `get()` methods
-- Serializes models using `model_dump()` and `model_validate()`
-- Filters by prefix using `kv.list(prefix)`
+**Implementation Details (0.4.0):**
+- Versioned saves use atomic SQL compare-and-set (`_internal/kv_cas.py`):
+  ``cas_insert`` (create-only) and ``cas_update`` (payload-equality guard).
+  Concurrent writers cannot silently lose updates (C1).
+- ``save`` preserves the stored ``created_at`` on update-style saves (M1).
+- ``save_many`` routes every item through ``save``, inheriting version
+  checks, increments, CAS conflicts, and ``created_at`` preservation.
+  Batch *updates* therefore require loaded records or fresh records that
+  match the stored version; per-item failures are reported in ``BatchResult``
+  (M2).
+- Records serialize via a JSON-native normalization pass (datetimes to
+  ISO-8601, bytes to a ``{"$fsdantic:bytes": "<base64>"}`` marker, enums to
+  values); typed ``load``/``load_many``/``list_all`` denormalize the marker
+  back to bytes (M6).
+- ``load`` returns ``None`` for stored JSON ``null``; indistinguishable from
+  a missing key — use ``exists`` to disambiguate (L11).
 
 #### NamespacedKVStore
 
@@ -234,8 +249,22 @@ def __init__(
 ```
 
 **Methods:**
-- `materialize(agent_fs, target_path, base_fs?, filters?, clean?) -> MaterializationResult` - Materialize to disk
+- `materialize(agent_fs, target_path, base_fs?, filters?, clean?, allow_root?) -> MaterializationResult` - Materialize to disk
 - `diff(overlay_fs, base_fs, path?) -> list[FileChange]` - Compute changes
+
+**Filter semantics (0.4.0):**
+- ``filters`` applies to files in both base and overlay layers; directories
+  are always descended into (nested matches are found); size constraints are
+  honored via the stat pass.
+
+**diff semantics (0.4.0):**
+- ``added``: present in overlay, absent from base.
+- ``modified``: present in both, different content or size.
+- ``deleted``: present in base, absent from overlay — a *visibility delta*;
+  materialize copies base first, so base-only files still reach the output
+  tree (H3).
+- Same-size files are compared with a single byte-accurate stream pass (H2,
+  L5/L8).
 
 **ConflictResolution Enum:**
 - `OVERWRITE` - Overlay wins
@@ -273,15 +302,21 @@ def __init__(
 ```
 
 **Methods:**
-- `merge(source, target, path?, strategy?) -> MergeResult` - Merge overlays
+- `merge(source, target, path?, strategy?, conflict_resolver?) -> MergeResult` - Merge overlays
 - `list_changes(overlay, path?) -> list[str]` - List overlay changes
 - `reset_overlay(overlay, paths?) -> int` - Reset overlay to base state
 
-**MergeStrategy Enum:**
+**MergeStrategy Enum (0.4.0):**
 - `OVERWRITE` - Overlay wins on conflicts
 - `PRESERVE` - Base wins on conflicts
 - `ERROR` - Raise on conflicts
-- `CALLBACK` - Use callback for conflicts
+- `CALLBACK` - Use callback for conflicts; **raises `OverlayError` when no
+  resolver is available** (M4). The resolver can be supplied per-call via
+  ``merge(..., conflict_resolver=...)`` (threaded through
+  ``OverlayManager.merge``).
+
+**reset_overlay errors (0.4.0):** partial failures raise ``OverlayError``
+(with ``context={"failed": [...]}``) instead of a bare ``RuntimeError`` (L2).
 
 **MergeResult:**
 - `files_merged: int` - Number of files merged
@@ -329,6 +364,9 @@ def __init__(agent_fs: AgentFS, base_fs: Optional[AgentFS] = None)
 - Read operations try overlay first, then fall through to base
 - Write operations always write to overlay
 - File existence checks both layers
+- ``list_dir`` (0.4.0): falls back to base when the overlay path is absent
+  (``ENOENT``) or the overlay listing is empty; when the overlay has entries,
+  overlay wins (M8).
 
 ---
 
@@ -447,6 +485,36 @@ files = await ops.search_files("**/*.py")
 ---
 
 ## Version History
+
+### 0.4.0 (2026-08-01)
+- **Breaking:** `TypedKVRepository.save` for `VersionedKVRecord` now uses
+  atomic SQL compare-and-set; concurrent writers raise `KVConflictError`
+  instead of silently losing updates (C1).
+- **Breaking:** `save_many` now routes through `save` — versioned records
+  inherit version checks/increments; per-item conflicts are reported in
+  `BatchResult` (M2).
+- **Breaking:** `diff`/`preview` now report base-only files with
+  `change_type="deleted"` (visibility delta; H3).
+- **Breaking:** `MergeStrategy.CALLBACK` without a resolver raises
+  `OverlayError` on conflict; `merge`/`OverlayManager.merge` accept a
+  per-call `conflict_resolver` (M4).
+- **Breaking:** `reset_overlay` partial failures raise `OverlayError`
+  instead of bare `RuntimeError` (L2).
+- **Breaking:** `ToolCall.duration_ms` is a plain field (single serialized
+  key); derived from timestamps at construction (L4).
+- **Behavior:** `materialize(filters=...)` is honored for files in both
+  layers; size filters applied (H1).
+- **Behavior:** `list_dir` falls back to base on `ENOENT` or empty overlay
+  listing; overlay wins when it has entries (M8).
+- **Behavior:** missing-key KV ops use an O(1) existence check instead of
+  an O(n) prefix scan (M5); raw KV values support datetime/bytes/Enum/Path
+  via a JSON-normalization pass (M6).
+- **Behavior:** MVCC open path validates IDs exactly like the non-MVCC path;
+  padded IDs are stripped (M7).
+- **Behavior:** `View.search_content` no longer mutates the shared query (M3).
+- **Behavior:** `read_many`/`get_many` gained `concurrency_limit` (L1);
+  `progress_callback` receives a real total; change labels distinguish
+  added/modified (L14).
 
 ### 0.3.0 (2026-02-14)
 - **Breaking:** Curated and tightened top-level import surface in `fsdantic.__init__`; consumers should import only names included in `fsdantic.__all__`.

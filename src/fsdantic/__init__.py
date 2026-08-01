@@ -1,5 +1,6 @@
 """Fsdantic - Type-safe Pydantic interface for AgentFS SDK."""
 
+from .client import Fsdantic
 from .exceptions import (
     ContentSearchError,
     DirectoryNotEmptyError,
@@ -9,9 +10,9 @@ from .exceptions import (
     FsdanticError,
     InvalidPathError,
     IsADirectoryError,
+    KeyNotFoundError,
     KVConflictError,
     KVStoreError,
-    KeyNotFoundError,
     MaterializationError,
     MergeConflictError,
     NotADirectoryError,
@@ -20,10 +21,8 @@ from .exceptions import (
     SerializationError,
     ValidationError,
 )
-from .client import Fsdantic
 from .files import FileManager, FileQuery
 from .kv import KVManager, KVTransaction
-from .operations import FileOperations
 from .materialization import (
     ConflictResolution,
     FileChange,
@@ -44,6 +43,7 @@ from .models import (
     ToolCallStatus,
     VersionedKVRecord,
 )
+from .operations import FileOperations
 from .overlay import (
     ConflictResolver,
     MergeConflict,
@@ -53,10 +53,10 @@ from .overlay import (
     OverlayOperations,
 )
 from .repository import NamespacedKVStore, TypedKVRepository
-from .workspace import Workspace
 from .view import SearchMatch, View, ViewQuery
+from .workspace import Workspace
 
-__version__ = "0.3.1"
+__version__ = "0.4.0"
 
 __all__ = [
     # Primary API
@@ -65,6 +65,7 @@ __all__ = [
     # Managers
     "FileManager",
     "FileQuery",
+    "FileOperations",
     "KVManager",
     "KVTransaction",
     "OverlayManager",
