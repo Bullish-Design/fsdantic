@@ -43,9 +43,45 @@ class FakeKVBackend:
         ]
 
 
+class FakeCursor:
+    """Minimal cursor stand-in returned by :class:`FakeConnection`."""
+
+    def __init__(self, row: Any) -> None:
+        self._row = row
+
+    async def fetchone(self) -> Any:
+        return self._row
+
+
+class FakeConnection:
+    """Minimal stand-in for the turso Connection on a fake backend.
+
+    Supports the O(1) ``key_exists`` SELECT shape used by :class:`KVManager`
+    for missing-key disambiguation.  Values are tracked as plain Python
+    objects (not JSON text); only row presence is queried.
+    """
+
+    def __init__(self, kv_backend: "FakeKVBackend") -> None:
+        self._backend = kv_backend
+
+    async def execute(self, sql: str, params: tuple[Any, ...] = ()) -> FakeCursor:
+        if sql.startswith("SELECT 1 FROM kv_store"):
+            (key,) = params
+            return FakeCursor((1,) if key in self._backend.data else None)
+        if sql.startswith("SELECT value FROM kv_store"):
+            (key,) = params
+            row = self._backend.data.get(key)
+            return FakeCursor((row,) if row is not None else None)
+        raise NotImplementedError(f"FakeConnection cannot execute: {sql}")
+
+
 class FakeAgentFS:
     def __init__(self) -> None:
         self.kv = FakeKVBackend()
+        self._conn = FakeConnection(self.kv)
+
+    def get_database(self) -> FakeConnection:
+        return self._conn
 
 
 class Profile(BaseModel):

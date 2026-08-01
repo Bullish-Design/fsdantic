@@ -2,10 +2,10 @@
 
 import time
 from datetime import datetime
-from enum import Enum
-from typing import Any, Optional
+from enum import StrEnum
+from typing import Any
 
-from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ._internal.paths import normalize_path
 
@@ -20,24 +20,19 @@ class AgentFSOptions(BaseModel):
         >>> options = AgentFSOptions(path="./data/mydb.db")
     """
 
-    id: Optional[str] = Field(
-        None,
-        description="Agent identifier (creates .agentfs/{id}.db)"
-    )
-    path: Optional[str] = Field(
-        None,
-        description="Custom database path"
-    )
+    id: str | None = Field(None, description="Agent identifier (creates .agentfs/{id}.db)")
+    path: str | None = Field(None, description="Custom database path")
 
     @field_validator("id", "path", mode="before")
     @classmethod
-    def validate_id_or_path(cls, v: Any) -> Optional[str]:
-        """Validate selector type and emptiness."""
+    def validate_id_or_path(cls, v: Any) -> str | None:
+        """Validate selector type and emptiness; strip surrounding whitespace."""
         if v is None:
             return None
         if not isinstance(v, str):
             raise ValueError("Selector values must be strings")
-        if v is not None and not v.strip():
+        v = v.strip()
+        if not v:
             raise ValueError("Selector values cannot be empty")
         return v
 
@@ -90,28 +85,16 @@ class ToolCall(BaseModel):
 
     id: int = Field(description="Unique call identifier")
     name: str = Field(description="Tool/function name")
-    parameters: dict[str, Any] = Field(
-        default_factory=dict,
-        description="Input parameters"
-    )
-    result: Optional[dict[str, Any]] = Field(
-        None,
-        description="Call result (for successful calls)"
-    )
-    error: Optional[str] = Field(
-        None,
-        description="Error message (for failed calls)"
-    )
+    parameters: dict[str, Any] = Field(default_factory=dict, description="Input parameters")
+    result: dict[str, Any] | None = Field(None, description="Call result (for successful calls)")
+    error: str | None = Field(None, description="Error message (for failed calls)")
     status: "ToolCallStatus" = Field(description="Call status: 'pending', 'success', or 'error'")
     started_at: datetime = Field(description="Call start timestamp")
-    completed_at: Optional[datetime] = Field(
+    completed_at: datetime | None = Field(None, description="Call completion timestamp")
+    duration_ms: float | None = Field(
         None,
-        description="Call completion timestamp"
-    )
-    explicit_duration_ms: Optional[float] = Field(
-        None,
-        alias="duration_ms",
-        description="Call duration in milliseconds"
+        description="Call duration in milliseconds. Explicit, or derived "
+        "from started_at/completed_at when not provided.",
     )
 
     @field_validator("status", mode="before")
@@ -142,19 +125,30 @@ class ToolCall(BaseModel):
             raise ValueError("result is required when status is 'success'")
         return self
 
-    @computed_field
+    @model_validator(mode="after")
+    def derive_duration_ms(self) -> "ToolCall":
+        """Derive ``duration_ms`` from timestamps when not explicitly provided.
+
+        The value is fixed at construction (rather than recomputed on access)
+        so that serialization emits exactly one ``duration_ms`` key.
+        """
+        if self.duration_ms is None and self.completed_at is not None:
+            delta = self.completed_at - self.started_at
+            self.duration_ms = delta.total_seconds() * 1000
+        return self
+
     @property
-    def duration_ms(self) -> Optional[float]:
-        """Return explicit duration when provided, otherwise compute from timestamps."""
-        if self.explicit_duration_ms is not None:
-            return self.explicit_duration_ms
+    def inferred_duration_ms(self) -> float | None:
+        """Backward-compatible explicit-or-derived duration view."""
+        if self.duration_ms is not None:
+            return self.duration_ms
         if self.completed_at is None:
             return None
         delta = self.completed_at - self.started_at
         return delta.total_seconds() * 1000
 
 
-class ToolCallStatus(str, Enum):
+class ToolCallStatus(StrEnum):
     """Enumerates supported tool call statuses."""
 
     PENDING = "pending"
@@ -200,7 +194,7 @@ class BatchItemResult(BaseModel):
     key_or_path: str = Field(description="Input key/path/identifier for this result")
     ok: bool = Field(description="True when the item operation succeeded")
     value: Any = Field(default=None, description="Result value for successful items")
-    error: Optional[str] = Field(default=None, description="Error message for failed items")
+    error: str | None = Field(default=None, description="Error message for failed items")
 
 
 class BatchResult(BaseModel):
@@ -239,14 +233,9 @@ class FileEntry(BaseModel):
         if not isinstance(value, str):
             raise ValueError("path must be a string")
         return normalize_path(value)
-    stats: Optional[FileStats] = Field(
-        None,
-        description="File statistics/metadata"
-    )
-    content: Optional[str | bytes] = Field(
-        None,
-        description="File content (if loaded)"
-    )
+
+    stats: FileStats | None = Field(None, description="File statistics/metadata")
+    content: str | bytes | None = Field(None, description="File content (if loaded)")
 
 
 class KVRecord(BaseModel):
@@ -265,13 +254,8 @@ class KVRecord(BaseModel):
         >>> user.mark_updated()  # Update the timestamp
     """
 
-    created_at: float = Field(
-        default_factory=time.time,
-        description="Creation timestamp (Unix epoch)"
-    )
-    updated_at: float = Field(
-        description="Last update timestamp (Unix epoch)"
-    )
+    created_at: float = Field(default_factory=time.time, description="Creation timestamp (Unix epoch)")
+    updated_at: float = Field(description="Last update timestamp (Unix epoch)")
 
     @model_validator(mode="before")
     @classmethod
@@ -314,10 +298,7 @@ class VersionedKVRecord(KVRecord):
         >>> config.version  # 2
     """
 
-    version: int = Field(
-        default=1,
-        description="Record version number"
-    )
+    version: int = Field(default=1, description="Record version number")
 
     def increment_version(self) -> None:
         """Increment version and update timestamp."""

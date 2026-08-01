@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from dataclasses import dataclass
+from datetime import date, datetime
+from enum import Enum
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
-
-from pydantic import BaseModel
+from uuid import UUID
 
 from agentfs_sdk import AgentFS, ErrnoException
+from pydantic import BaseModel
 
-from .exceptions import FsdanticError, KVStoreError, KeyNotFoundError, SerializationError
+from ._internal.kv_cas import get_raw as _kv_get_raw
+from ._internal.kv_cas import key_exists
+from .exceptions import FsdanticError, KeyNotFoundError, KVStoreError, SerializationError
 from .models import BatchItemResult, BatchResult
 
 if TYPE_CHECKING:
@@ -18,6 +24,55 @@ if TYPE_CHECKING:
 
 
 _MISSING = object()
+
+# Marker key used to encode ``bytes`` values for storage.
+_BYTES_MARKER = "$fsdantic:bytes"
+
+
+def _kv_normalize(value: Any) -> Any:
+    """Recursively convert non-JSON values to JSON-native equivalents.
+
+    Handles: datetime/date -> ISO-8601 string, bytes -> ``{"$fsdantic:bytes":
+    "<base64>"}``, set/frozenset -> sorted list, Enum -> its value, and
+    Path/UUID -> string.  Any other value is passed through so the SDK's
+    ``json.dumps`` can raise for genuinely unserializable objects (which
+    :meth:`KVManager.set` wraps in :class:`SerializationError`).
+    """
+    if isinstance(value, dict):
+        return {str(key): _kv_normalize(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_kv_normalize(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        return sorted(_kv_normalize(item) for item in value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, bytes):
+        return {_BYTES_MARKER: base64.b64encode(value).decode("ascii")}
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, (Path, UUID)):
+        return str(value)
+    return value
+
+
+def _kv_denormalize(value: Any) -> Any:
+    """Recursively convert fsdantic marker encodings back to Python objects.
+
+    The inverse of :func:`_kv_normalize` for the encodings that are not
+    JSON-native round-trips: ``{"$fsdantic:bytes": "<base64>"}`` becomes
+    ``bytes`` again.  Used by the typed repository layer so byte fields
+    round-trip losslessly.  Malformed markers are left as plain dicts.
+    """
+    if isinstance(value, dict):
+        if len(value) == 1 and _BYTES_MARKER in value and isinstance(value[_BYTES_MARKER], str):
+            try:
+                return base64.b64decode(value[_BYTES_MARKER], validate=True)
+            except (ValueError, TypeError):
+                pass
+        return {str(key): _kv_denormalize(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_kv_denormalize(item) for item in value]
+    return value
 
 
 @dataclass(slots=True)
@@ -43,12 +98,12 @@ class KVTransaction:
       errors and manual reconciliation may be required.
     """
 
-    def __init__(self, manager: "KVManager") -> None:
+    def __init__(self, manager: KVManager) -> None:
         self._manager = manager
         self._staged: dict[str, _StagedOperation] = {}
         self._committed = False
 
-    async def __aenter__(self) -> "KVTransaction":
+    async def __aenter__(self) -> KVTransaction:
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> bool:
@@ -114,14 +169,11 @@ class KVTransaction:
                     TypeError,
                     ValueError,
                 ) as rollback_exc:  # pragma: no cover - defensive
-                    rollback_errors.append(
-                        f"key={staged.key}: {rollback_exc}"
-                    )
+                    rollback_errors.append(f"key={staged.key}: {rollback_exc}")
 
             if rollback_errors:
                 raise KVStoreError(
-                    "KV transaction commit failed and rollback was partial; "
-                    "manual reconciliation may be required"
+                    "KV transaction commit failed and rollback was partial; manual reconciliation may be required"
                 ) from exc
 
             raise KVStoreError("KV transaction commit failed; applied changes were rolled back") from exc
@@ -150,6 +202,8 @@ class KVManager:
         """
         self._agent_fs = agent_fs
         self._prefix = self._compose_prefix("", prefix)
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._locks_guard = asyncio.Lock()
 
     @staticmethod
     def _compose_prefix(base: str, child: str) -> str:
@@ -190,6 +244,33 @@ class KVManager:
         """Return the fully-qualified KV key for this manager namespace."""
         return f"{self._prefix}{key}"
 
+    def _conn(self):
+        """Return the raw turso connection backing this manager."""
+        return self._agent_fs.get_database()
+
+    async def _key_lock(self, qualified_key: str) -> asyncio.Lock:
+        """Return the per-key asyncio.Lock for intra-process serialization.
+
+        The lock registry never shrinks; keys are typically bounded by the
+        application's key space.  This is defense-in-depth for same-process
+        tasks: the SQL CAS in ``_internal/kv_cas`` remains the source of
+        truth for cross-process safety.
+        """
+        async with self._locks_guard:
+            return self._locks.setdefault(qualified_key, asyncio.Lock())
+
+    async def get_raw(self, key: str) -> str | None:
+        """Return the raw JSON text stored for a key, or ``None`` when missing.
+
+        This is an O(1) direct SQL read used by the repository layer to
+        implement atomic compare-and-set without JSON round-trips.
+
+        Coupling note: targets the AgentFS ``kv_store`` schema directly
+        (see ``_internal/kv_cas``).
+        """
+        qualified_key = self._qualify_key(key)
+        return await _kv_get_raw(self._conn(), qualified_key)
+
     def transaction(self) -> KVTransaction:
         """Create a best-effort transaction context for grouped KV operations."""
         return KVTransaction(self)
@@ -205,30 +286,27 @@ class KVManager:
             - If `key` does not exist and `default` is provided, return `default`.
             - If `key` does not exist and no `default` is provided,
               raise `KeyNotFoundError`.
+
+        Note: a stored JSON ``null`` value is returned as ``None`` and is
+        indistinguishable from a missing key via this method.  Use
+        :meth:`exists` to disambiguate.
         """
         qualified_key = self._qualify_key(key)
         try:
             value = await self._agent_fs.kv.get(qualified_key)
         except (TypeError, ValueError) as exc:
             raise SerializationError(
-                f"KV deserialization failed during get for key='{qualified_key}' "
-                f"(prefix='{self._prefix}')"
+                f"KV deserialization failed during get for key='{qualified_key}' (prefix='{self._prefix}')"
             ) from exc
 
         if value is not None:
             return value
 
-        try:
-            matched = await self._agent_fs.kv.list(prefix=qualified_key)
-        except (ErrnoException, RuntimeError) as exc:
-            raise KVStoreError(
-                f"KV operation=get-check-missing failed for key='{qualified_key}' "
-                f"(prefix='{self._prefix}')"
-            ) from exc
-
-        exists = any(item.get("key") == qualified_key for item in matched)
-        if exists:
-            return value
+        # ``None`` here means either "stored literal null" or "missing".
+        # Disambiguate with an O(1) existence check instead of an O(n)
+        # prefix scan that JSON-deserializes every matching key.
+        if await key_exists(self._conn(), qualified_key):
+            return value  # stored literal null
         if default is not _MISSING:
             return default
         raise KeyNotFoundError(qualified_key)
@@ -237,21 +315,28 @@ class KVManager:
         """Set a value by key using simple KV semantics.
 
         This stores raw KV values directly. For Pydantic models, prefer
-        `repository().save(...)`.
+        ``repository().save(...)``.
+
+        Non-JSON values are normalized before storage: datetimes become
+        ISO-8601 strings, bytes become ``{"$fsdantic:bytes": "<base64>"}``,
+        sets become sorted lists, enums become their values, and Path/UUID
+        become strings.
+
+        Decode asymmetry (documented): raw :meth:`get` returns the JSON-native
+        form, NOT the original Python object (datetimes come back as ISO
+        strings, bytes as the marker dict).  Typed repositories round-trip
+        losslessly because pydantic re-coerces during ``model_validate``.
         """
         qualified_key = self._qualify_key(key)
         try:
-            await self._agent_fs.kv.set(qualified_key, value)
+            await self._agent_fs.kv.set(qualified_key, _kv_normalize(value))
         except (TypeError, ValueError) as exc:
             raise SerializationError(
                 f"KV serialization failed during set for key='{qualified_key}' "
-                f"(prefix='{self._prefix}')"
+                f"(prefix='{self._prefix}'): unsupported type {type(value).__name__}"
             ) from exc
         except (ErrnoException, RuntimeError) as exc:
-            raise KVStoreError(
-                f"KV operation=set failed for key='{qualified_key}' "
-                f"(prefix='{self._prefix}')"
-            ) from exc
+            raise KVStoreError(f"KV operation=set failed for key='{qualified_key}' (prefix='{self._prefix}')") from exc
 
     async def delete(self, key: str) -> bool:
         """Delete a value by key using simple KV semantics.
@@ -262,43 +347,45 @@ class KVManager:
             - Missing-key deletes are a stable no-op.
         """
         qualified_key = self._qualify_key(key)
-        try:
-            matched = await self._agent_fs.kv.list(prefix=qualified_key)
-        except (ErrnoException, RuntimeError) as exc:
-            raise KVStoreError(
-                f"KV operation=delete-check-exists failed for key='{qualified_key}' "
-                f"(prefix='{self._prefix}')"
-            ) from exc
-
-        exists = any(item.get("key") == qualified_key for item in matched)
-        if not exists:
+        if not await key_exists(self._conn(), qualified_key):
             return False
 
+        # TOCTOU note: another writer could delete the key between the
+        # existence check and the delete; the delete then silently no-ops.
+        # Acceptable for this API (documented); the CAS pattern could close
+        # the gap via ``DELETE ... WHERE key=?`` + rowcount if ever needed.
         try:
             await self._agent_fs.kv.delete(qualified_key)
         except (ErrnoException, RuntimeError) as exc:
             raise KVStoreError(
-                f"KV operation=delete failed for key='{qualified_key}' "
-                f"(prefix='{self._prefix}')"
+                f"KV operation=delete failed for key='{qualified_key}' (prefix='{self._prefix}')"
             ) from exc
         return True
 
-    async def get_many(self, keys: list[str], *, default: Any = _MISSING) -> BatchResult:
+    async def get_many(self, keys: list[str], *, default: Any = _MISSING, concurrency_limit: int = 10) -> BatchResult:
         """Get many keys with deterministic ordering and per-item outcomes.
 
         The return order exactly matches the input order. Missing keys are
         failures when ``default`` is omitted and successes with ``value=default``
         when ``default`` is provided.
+
+        ``concurrency_limit`` bounds fan-out using ``asyncio.Semaphore``
+        (matching ``set_many``/``delete_many``).
         """
+        if concurrency_limit <= 0:
+            raise ValueError("concurrency_limit must be greater than 0")
         if not keys:
             return BatchResult()
 
+        semaphore = asyncio.Semaphore(concurrency_limit)
+
         async def _get_one(index: int, key: str) -> BatchItemResult:
-            try:
-                value = await self.get(key, default=default)
-                return BatchItemResult(index=index, key_or_path=key, ok=True, value=value)
-            except (FsdanticError, TypeError, ValueError) as exc:  # pragma: no cover - defensive fallback
-                return BatchItemResult(index=index, key_or_path=key, ok=False, error=str(exc))
+            async with semaphore:
+                try:
+                    value = await self.get(key, default=default)
+                    return BatchItemResult(index=index, key_or_path=key, ok=True, value=value)
+                except (FsdanticError, TypeError, ValueError) as exc:  # pragma: no cover - defensive fallback
+                    return BatchItemResult(index=index, key_or_path=key, ok=False, error=str(exc))
 
         gathered = await asyncio.gather(
             *(_get_one(index, key) for index, key in enumerate(keys)),
@@ -405,9 +492,7 @@ class KVManager:
         qualified_prefix = self._qualify_key(prefix)
         items = await self._agent_fs.kv.list(prefix=qualified_prefix)
         return [
-            {**item, "key": item["key"][len(self._prefix) :]}
-            for item in items
-            if item["key"].startswith(self._prefix)
+            {**item, "key": item["key"][len(self._prefix) :]} for item in items if item["key"].startswith(self._prefix)
         ]
 
     def repository(
@@ -442,7 +527,7 @@ class KVManager:
             model_type=model_type,
         )
 
-    def namespace(self, prefix: str) -> "KVManager":
+    def namespace(self, prefix: str) -> KVManager:
         """Create a child KV manager scoped to a nested namespace prefix.
 
         The returned manager supports both simple KV methods and typed

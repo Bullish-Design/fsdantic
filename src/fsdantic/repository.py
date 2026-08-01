@@ -1,20 +1,25 @@
 """Generic repository pattern for AgentFS KV operations."""
 
-from typing import Any, Callable, Generic, Optional, Type, TypeVar
+import asyncio
+import json
+import logging
+from collections.abc import Callable
+from typing import Any
 
 from agentfs_sdk import AgentFS
 from pydantic import BaseModel, ValidationError
 
-from .exceptions import KVConflictError
-from .kv import KVManager
+from ._internal.kv_cas import _sdk_serialize, cas_insert, cas_update
+from .exceptions import FsdanticError, KVConflictError
+from .kv import KVManager, _kv_denormalize, _kv_normalize
 from .models import BatchItemResult, BatchResult, VersionedKVRecord
+
+logger = logging.getLogger(__name__)
 
 _MISSING = object()
 
-T = TypeVar("T", bound=BaseModel)
 
-
-class TypedKVRepository(Generic[T]):
+class TypedKVRepository[T: BaseModel]:
     """Generic typed KV operations for Pydantic models.
 
     Provides a type-safe repository pattern for storing and retrieving
@@ -36,8 +41,8 @@ class TypedKVRepository(Generic[T]):
         self,
         storage: AgentFS,
         prefix: str = "",
-        model_type: Optional[Type[T]] = None,
-        key_builder: Optional[Callable[[str], str]] = None,
+        model_type: type[T] | None = None,
+        key_builder: Callable[[str], str] | None = None,
     ):
         """Initialize repository.
 
@@ -54,7 +59,7 @@ class TypedKVRepository(Generic[T]):
         self.key_builder = key_builder or (lambda id: f"{prefix}{id}")
         self._manager = KVManager(storage)
 
-    def _resolve_model_type(self, model_type: Optional[Type[T]]) -> Type[T]:
+    def _resolve_model_type(self, model_type: type[T] | None) -> type[T]:
         resolved = model_type or self.model_type
         if resolved is None:
             raise ValueError(
@@ -114,35 +119,14 @@ class TypedKVRepository(Generic[T]):
         resolved_expected = self._coerce_expected_version(expected_version=expected_version, etag=etag)
 
         if isinstance(record, VersionedKVRecord):
-            current = await self._manager.get(key, default=None)
-            actual_version = self._extract_version(current)
-
-            if current is None:
-                effective_expected = resolved_expected
-                if effective_expected is not None:
-                    raise KVConflictError(key=key, expected_version=effective_expected, actual_version=None)
-                if record.version != 1:
-                    raise KVConflictError(key=key, expected_version=record.version, actual_version=None)
-                await self._manager.set(key, record.model_dump())
-                return
-
-            effective_expected = resolved_expected if resolved_expected is not None else record.version
-            if actual_version != effective_expected:
-                raise KVConflictError(
-                    key=key,
-                    expected_version=effective_expected,
-                    actual_version=actual_version,
-                )
-
-            updated_record = record.model_copy(deep=True)
-            updated_record.version = actual_version
-            updated_record.increment_version()
-            await self._manager.set(key, updated_record.model_dump())
-
-            # Keep caller instance in sync after successful commit.
-            record.version = updated_record.version
-            record.updated_at = updated_record.updated_at
-            return
+            # Serialize with a JSON-native normalization pass so datetimes,
+            # enums, bytes, and Path values become storable JSON values that
+            # CAS payloads can compare deterministically.
+            return await self._save_versioned(
+                key=key,
+                record=record,
+                resolved_expected=resolved_expected,
+            )
 
         if resolved_expected is not None:
             current = await self._manager.get(key, default=None)
@@ -156,6 +140,95 @@ class TypedKVRepository(Generic[T]):
 
         # AgentFS KV store accepts dicts, not JSON strings
         await self._manager.set(key, record.model_dump())
+
+    async def _save_versioned(
+        self,
+        *,
+        key: str,
+        record: T,
+        resolved_expected: int | None,
+    ) -> None:
+        """Versioned save with atomic compare-and-set semantics (C1, M1).
+
+        The read-modify-write section is serialized intra-process with a
+        per-key asyncio.Lock (defense in depth) and the payload-equality CAS
+        is the authoritative guard against concurrent writers (including
+        other processes/connections).
+        """
+        lock = await self._manager._key_lock(key)
+        async with lock:
+            conn = self.storage.get_database()
+            current_raw = await self._manager.get_raw(key)
+
+            if current_raw is None:
+                # Create-only path: atomic INSERT guard.
+                effective_expected = resolved_expected
+                if effective_expected is not None:
+                    raise KVConflictError(
+                        key=key,
+                        expected_version=effective_expected,
+                        actual_version=None,
+                    )
+                if record.version != 1:
+                    raise KVConflictError(
+                        key=key,
+                        expected_version=record.version,
+                        actual_version=None,
+                    )
+                ok = await cas_insert(conn, key, _sdk_serialize(_kv_normalize(record.model_dump())))
+                if not ok:
+                    # Another writer created the key between our read and insert.
+                    raise KVConflictError(
+                        key=key,
+                        expected_version=None,
+                        actual_version=None,
+                    )
+                return
+
+            # Existing key: compute the next payload with preserved created_at.
+            current = json.loads(current_raw)
+            actual_version = self._extract_version(current)
+            effective_expected = resolved_expected if resolved_expected is not None else record.version
+            if actual_version != effective_expected:
+                raise KVConflictError(
+                    key=key,
+                    expected_version=effective_expected,
+                    actual_version=actual_version,
+                )
+
+            updated_record = record.model_copy(deep=True)
+            stored_created_at = current.get("created_at") if isinstance(current, dict) else None
+            if stored_created_at is not None:
+                updated_record.created_at = stored_created_at
+            else:
+                logger.debug(
+                    "Legacy payload without created_at for key=%s; falling back to caller value",
+                    key,
+                )
+            updated_record.version = actual_version
+            updated_record.increment_version()
+
+            ok = await cas_update(
+                conn,
+                key,
+                current_raw,
+                _sdk_serialize(_kv_normalize(updated_record.model_dump())),
+            )
+            if not ok:
+                # The payload changed between read and write. Re-read to
+                # report the actual (fresh) version.
+                fresh = json.loads(await self._manager.get_raw(key))
+                raise KVConflictError(
+                    key=key,
+                    expected_version=effective_expected,
+                    actual_version=self._extract_version(fresh),
+                )
+
+            # Keep caller instance in sync after successful commit.
+            record.version = updated_record.version
+            record.updated_at = updated_record.updated_at
+            record.created_at = updated_record.created_at
+            return
 
     async def save_if_version(self, id: str, record: T, expected_version: int) -> None:
         """Save only when current version matches ``expected_version``."""
@@ -172,7 +245,7 @@ class TypedKVRepository(Generic[T]):
         """Alias for save with explicit optimistic concurrency semantics."""
         await self.save(id, record, expected_version=expected_version, etag=etag)
 
-    async def load(self, id: str, model_type: Optional[Type[T]] = None) -> Optional[T]:
+    async def load(self, id: str, model_type: type[T] | None = None) -> T | None:
         """Load a record from KV store.
 
         Args:
@@ -182,6 +255,10 @@ class TypedKVRepository(Generic[T]):
 
         Returns:
             Model instance or None if not found
+
+        Note: a stored JSON ``null`` value under ``id`` returns ``None`` and
+        is indistinguishable from a missing key.  Use :meth:`exists` to
+        disambiguate.
 
         Examples:
             >>> user = await repo.load("user1", UserRecord)
@@ -193,7 +270,7 @@ class TypedKVRepository(Generic[T]):
         if data is None:
             return None
         # AgentFS KV store returns dict, not JSON string
-        return self._resolve_model_type(model_type).model_validate(data)
+        return self._resolve_model_type(model_type).model_validate(_kv_denormalize(data))
 
     async def delete(self, id: str) -> None:
         """Delete a record from KV store.
@@ -207,7 +284,7 @@ class TypedKVRepository(Generic[T]):
         key = self.key_builder(id)
         await self._manager.delete(key)
 
-    async def list_all(self, model_type: Optional[Type[T]] = None) -> list[T]:
+    async def list_all(self, model_type: type[T] | None = None) -> list[T]:
         """List all records with the configured prefix.
 
         Args:
@@ -229,7 +306,7 @@ class TypedKVRepository(Generic[T]):
 
         for item in items:
             try:
-                records.append(resolved_model_type.model_validate(item["value"]))
+                records.append(resolved_model_type.model_validate(_kv_denormalize(item["value"])))
             except ValidationError:
                 continue
 
@@ -258,9 +335,49 @@ class TypedKVRepository(Generic[T]):
         *,
         concurrency_limit: int = 10,
     ) -> BatchResult:
-        """Save many records with bounded concurrency and per-item outcomes."""
-        payload = [(self.key_builder(record_id), record.model_dump()) for record_id, record in records]
-        return await self._manager.set_many(payload, concurrency_limit=concurrency_limit)
+        """Save many records with bounded concurrency and per-item outcomes.
+
+        Every item routes through :meth:`save`, so versioned records inherit
+        the full optimistic-concurrency semantics: version checks, CAS
+        conflict detection, and ``created_at`` preservation.  Batch saves of
+        brand-new records remain conflict-free; batch *updates* require
+        callers to pass loaded records (version already set) or accept that a
+        fresh record at version 1 conflicts when the stored version is > 1.
+        """
+        if concurrency_limit <= 0:
+            raise ValueError("concurrency_limit must be greater than 0")
+        if not records:
+            return BatchResult()
+
+        semaphore = asyncio.Semaphore(concurrency_limit)
+
+        async def _save_one(index: int, record_id: str, record: T) -> BatchItemResult:
+            async with semaphore:
+                try:
+                    await self.save(record_id, record)
+                    return BatchItemResult(index=index, key_or_path=record_id, ok=True, value=True)
+                except (FsdanticError, TypeError, ValueError) as exc:
+                    return BatchItemResult(index=index, key_or_path=record_id, ok=False, error=str(exc))
+
+        gathered = await asyncio.gather(
+            *(_save_one(index, record_id, record) for index, (record_id, record) in enumerate(records)),
+            return_exceptions=True,
+        )
+
+        items: list[BatchItemResult] = []
+        for index, raw_result in enumerate(gathered):
+            if isinstance(raw_result, BatchItemResult):
+                items.append(raw_result)
+            else:
+                items.append(
+                    BatchItemResult(
+                        index=index,
+                        key_or_path=records[index][0],
+                        ok=False,
+                        error=str(raw_result),
+                    )
+                )
+        return BatchResult(items=items)
 
     async def delete_many(
         self,
@@ -275,7 +392,7 @@ class TypedKVRepository(Generic[T]):
     async def load_many(
         self,
         ids: list[str],
-        model_type: Optional[Type[T]] = None,
+        model_type: type[T] | None = None,
         *,
         default: Any = _MISSING,
     ) -> BatchResult:
@@ -303,7 +420,7 @@ class TypedKVRepository(Generic[T]):
                 continue
 
             try:
-                model = resolved_model_type.model_validate(value)
+                model = resolved_model_type.model_validate(_kv_denormalize(value))
                 items.append(BatchItemResult(index=index, key_or_path=ids[index], ok=True, value=model))
             except ValidationError as exc:
                 items.append(
@@ -328,12 +445,12 @@ class TypedKVRepository(Generic[T]):
     async def load_batch(
         self,
         ids: list[str],
-        model_type: Optional[Type[T]] = None,
-    ) -> dict[str, Optional[T]]:
+        model_type: type[T] | None = None,
+    ) -> dict[str, T | None]:
         """Compatibility wrapper for :meth:`load_many`."""
         batch = await self.load_many(ids, model_type=model_type, default=None)
-        results: dict[str, Optional[T]] = {}
-        for record_id, item in zip(ids, batch.items):
+        results: dict[str, T | None] = {}
+        for record_id, item in zip(ids, batch.items, strict=True):
             results[record_id] = item.value if item.ok else None
         return results
 
