@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import logging
+import os
+import re
 
-from agentfs_sdk import AgentFS, AgentFSOptions as SDKAgentFSOptions
+from agentfs_sdk import AgentFS
+from agentfs_sdk import AgentFSOptions as SDKAgentFSOptions
 from turso.aio import Connection as TursoConnection
 from turso.aio import connect as turso_connect
 
@@ -12,6 +15,37 @@ from .models import AgentFSOptions
 from .workspace import Workspace
 
 logger = logging.getLogger(__name__)
+
+
+# Mirrors the AgentFS SDK's agent-id validation
+# (``sdk/python/agentfs_sdk/agentfs.py``): alphanumerics, hyphens, underscores.
+_ID_REGEX = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def _validate_selector(options: AgentFSOptions) -> None:
+    """Validate the selector shape for both open paths (mirrors SDK rules).
+
+    Raises:
+        ValueError: when ``options.id`` contains characters outside the SDK
+            agent-id alphabet.
+    """
+    if options.id is not None and not _ID_REGEX.match(options.id):
+        raise ValueError("Agent ID must contain only alphanumeric characters, hyphens, and underscores")
+
+
+def _resolve_db_path(options: AgentFSOptions) -> str:
+    """Single source of truth for database path resolution (mirrors SDK logic).
+
+    Raises:
+        ValueError: when neither ``id`` nor ``path`` is provided.
+    """
+    if options.path:
+        return options.path
+    if options.id:
+        directory = ".agentfs"
+        os.makedirs(directory, exist_ok=True)
+        return f"{directory}/{options.id}.db"
+    raise ValueError("AgentFS.open() requires at least 'id' or 'path'.")
 
 
 async def _enable_wal(conn: TursoConnection) -> None:
@@ -87,20 +121,10 @@ class Fsdantic:
         Uses ``experimental_features='mvcc'`` and ``isolation_level=None``
         (autocommit) to enable ``BEGIN CONCURRENT`` transactions.
         """
-        sdk_options = SDKAgentFSOptions(id=options.id, path=options.path)
-
-        # Resolve the database path the same way AgentFS.open() does
-        if sdk_options.path:
-            db_path = sdk_options.path
-        elif sdk_options.id:
-            import os
-
-            directory = ".agentfs"
-            os.makedirs(directory, exist_ok=True)
-            db_path = f"{directory}/{sdk_options.id}.db"
-        else:
-            msg = "AgentFS.open() requires at least 'id' or 'path'."
-            raise ValueError(msg)
+        # Same validation as the non-MVCC path; never create DBs for
+        # invalid selectors.
+        _validate_selector(options)
+        db_path = _resolve_db_path(options)
 
         conn = await turso_connect(
             db_path,
@@ -121,6 +145,7 @@ class Fsdantic:
         This is the low-level path that does not accept concurrency
         parameters.  Use :meth:`open` for WAL/MVCC configuration.
         """
+        _validate_selector(options)
         sdk_options = SDKAgentFSOptions(id=options.id, path=options.path)
         agentfs = await AgentFS.open(sdk_options)
         return Workspace(agentfs)

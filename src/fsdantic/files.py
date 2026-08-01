@@ -1,21 +1,20 @@
 """Primary public API for file operations and traversal."""
 
 import asyncio
-import logging
 import codecs
 import json
+import logging
 import re
 from collections.abc import AsyncIterator
-from typing import Any, Literal, Optional, overload
+from typing import Any, Literal, overload
 
 from agentfs_sdk import AgentFS, ErrnoException
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
 from ._internal.errors import translate_agentfs_error
-from .exceptions import FileNotFoundError
 from ._internal.paths import join_normalized_path, normalize_glob_pattern, normalize_path
+from .exceptions import FileNotFoundError
 from .models import BatchItemResult, BatchResult, FileEntry, FileStats
-
 
 logger = logging.getLogger(__name__)
 
@@ -32,18 +31,23 @@ class FileQuery(BaseModel):
 
     path_pattern: str = Field(
         default="*",
-        description="Glob pattern for matching file paths (e.g., '*.py', '/data/**/*.json')",
+        description=(
+            "Glob pattern for matching file paths (e.g., '*.py', '/data/**/*.json'). "
+            "Semantics: '*' matches leading dots (this is a glob, not a shell glob); "
+            "'a/**' matches descendants of /a but not /a itself; an empty pattern "
+            "is equivalent to '*' and matches everything."
+        ),
     )
     recursive: bool = Field(default=True, description="Whether to search subdirectories")
     include_content: bool = Field(default=False, description="Whether to load file contents")
     include_stats: bool = Field(default=True, description="Whether to include file statistics")
-    regex_pattern: Optional[str] = Field(None, description="Optional regex path filter")
-    max_size: Optional[int] = Field(None, ge=0, description="Maximum file size in bytes")
-    min_size: Optional[int] = Field(None, ge=0, description="Minimum file size in bytes")
+    regex_pattern: str | None = Field(None, description="Optional regex path filter")
+    max_size: int | None = Field(None, ge=0, description="Maximum file size in bytes")
+    min_size: int | None = Field(None, ge=0, description="Minimum file size in bytes")
 
     _normalized_path_pattern: str = PrivateAttr(default="*")
     _path_matcher: re.Pattern[str] = PrivateAttr(default_factory=lambda: re.compile(".*"))
-    _regex_matcher: Optional[re.Pattern[str]] = PrivateAttr(default=None)
+    _regex_matcher: re.Pattern[str] | None = PrivateAttr(default=None)
 
     @staticmethod
     def _normalize_path_pattern(pattern: str) -> str:
@@ -84,7 +88,10 @@ class FileQuery(BaseModel):
 
         self._normalized_path_pattern = self._normalize_path_pattern(self.path_pattern)
         self._path_matcher = self._compile_glob_pattern(self._normalized_path_pattern)
-        self._regex_matcher = re.compile(self.regex_pattern) if self.regex_pattern else None
+        try:
+            self._regex_matcher = re.compile(self.regex_pattern) if self.regex_pattern else None
+        except re.error as exc:
+            raise ValueError(f"Invalid regex_pattern: {exc}") from exc
         return self
 
     def matches_path(self, path: str) -> bool:
@@ -114,7 +121,7 @@ class FileManager:
     _JSON_INDENT = 2
     _JSON_SEPARATORS = (",", ": ")
 
-    def __init__(self, agent_fs: AgentFS, base_fs: Optional[AgentFS] = None):
+    def __init__(self, agent_fs: AgentFS, base_fs: AgentFS | None = None):
         self.agent_fs = agent_fs
         self.base_fs = base_fs
 
@@ -152,13 +159,14 @@ class FileManager:
         * ``mode='text'`` returns ``str`` and requires a valid text ``encoding``.
         * ``mode='binary'`` returns ``bytes`` and requires ``encoding=None``.
 
-        Use :meth:`read_stream` when handling large binary files to avoid keeping
-        the full content in memory at once. Use ``read()`` for convenience when
-        full in-memory content is acceptable.
+        Use :meth:`read_stream` when callers prefer chunked yields for
+        incremental processing.  Note: until the SDK exposes a true streaming
+        read, ``read_stream`` buffers the full payload in memory and slices it.
+        Use ``read()`` for convenience when full in-memory content is acceptable.
         """
         path = normalize_path(path)
         context = f"FileManager.read(path={path!r})"
-        resolved_encoding: Optional[str]
+        resolved_encoding: str | None
 
         if mode == "text":
             if encoding is _UNSET:
@@ -261,23 +269,32 @@ class FileManager:
         *,
         mode: Literal["text", "binary"] = "text",
         encoding: str | None | _UnsetEncoding = _UNSET,
+        concurrency_limit: int = 10,
     ) -> BatchResult:
         """Read multiple files with deterministic ordering and per-item outcomes.
 
         This API always returns a ``BatchResult`` containing one ``BatchItemResult``
         per input path in the same order as ``paths``. Partial failures do not abort
         the batch; failed items include ``error`` and can be retried individually.
+
+        ``concurrency_limit`` bounds fan-out using ``asyncio.Semaphore`` (matching
+        the write paths); results preserve the original ``paths`` ordering.
         """
+        if concurrency_limit <= 0:
+            raise ValueError("concurrency_limit must be greater than 0")
         if not paths:
             return BatchResult()
 
+        semaphore = asyncio.Semaphore(concurrency_limit)
+
         async def _read_one(index: int, raw_path: str) -> BatchItemResult:
             path = normalize_path(raw_path)
-            try:
-                value = await self.read(path, mode=mode, encoding=encoding)
-                return BatchItemResult(index=index, key_or_path=path, ok=True, value=value)
-            except Exception as exc:  # pragma: no cover - defensive fallback
-                return BatchItemResult(index=index, key_or_path=path, ok=False, error=str(exc))
+            async with semaphore:
+                try:
+                    value = await self.read(path, mode=mode, encoding=encoding)
+                    return BatchItemResult(index=index, key_or_path=path, ok=True, value=value)
+                except Exception as exc:  # pragma: no cover - defensive fallback
+                    return BatchItemResult(index=index, key_or_path=path, ok=False, error=str(exc))
 
         gathered = await asyncio.gather(
             *(_read_one(index, path) for index, path in enumerate(paths)),
@@ -457,6 +474,13 @@ class FileManager:
     ) -> list[str]:
         """List directory entries at path in deterministic sorted order.
 
+        Reads from the overlay first; if the path is absent from the overlay
+        (``ENOENT``) and a ``base_fs`` is configured, falls back to listing
+        the base layer.  An empty overlay listing also falls through to base
+        (an empty overlay directory does not shadow base content — consistent
+        with ``read``, ``stat``, and ``exists`` union semantics).  When the
+        overlay has entries, only overlay entries are returned (overlay wins).
+
         Args:
             path: Directory path to list.
             output: Output path style for each entry:
@@ -469,10 +493,26 @@ class FileManager:
         if output not in {"name", "relative", "full"}:
             raise ValueError("output must be 'name', 'relative', or 'full'")
 
+        entries = None
         try:
             entries = await self.agent_fs.fs.readdir(path)
         except ErrnoException as e:
-            raise translate_agentfs_error(e, context) from e
+            if e.code != "ENOENT":
+                raise translate_agentfs_error(e, context) from e
+            if self.base_fs is None:
+                raise translate_agentfs_error(e, context) from e
+            try:
+                entries = await self.base_fs.fs.readdir(path)
+            except ErrnoException as base_error:
+                raise translate_agentfs_error(base_error, context) from base_error
+        else:
+            if not entries and self.base_fs is not None:
+                try:
+                    base_entries = await self.base_fs.fs.readdir(path)
+                except ErrnoException:
+                    base_entries = []
+                if base_entries:
+                    entries = base_entries
 
         sorted_entries = sorted(entries)
         if output == "name" or output == "relative":
@@ -575,7 +615,7 @@ class FileManager:
             count += 1
         return count
 
-    async def tree(self, path: str = "/", max_depth: Optional[int] = None) -> dict[str, Any]:
+    async def tree(self, path: str = "/", max_depth: int | None = None) -> dict[str, Any]:
         """Return a stable tree schema rooted at path.
 
         Returns a node dictionary with the shape:
