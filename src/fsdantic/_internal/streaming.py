@@ -23,28 +23,38 @@ async def compare_streams(
     left: AsyncIterator[bytes],
     right: AsyncIterator[bytes],
 ) -> bool:
-    """Compare two byte streams chunk-by-chunk."""
+    """Compare two byte streams for content equality regardless of chunk boundaries.
+
+    The comparison uses a carry-over buffer, so identical content split into
+    different chunk sizes on each side compares equal (``[b"abc", b"def"]``
+    vs ``[b"ab", b"cdef"]`` -> True).  Empty chunks and uneven lengths are
+    handled correctly.
+    """
     left_iter = left.__aiter__()
     right_iter = right.__aiter__()
 
-    while True:
+    async def _next(iterator):
         try:
-            left_chunk = await left_iter.__anext__()
-            left_done = False
+            return await iterator.__anext__()
         except StopAsyncIteration:
-            left_chunk = b""
-            left_done = True
+            return None
 
-        try:
-            right_chunk = await right_iter.__anext__()
-            right_done = False
-        except StopAsyncIteration:
-            right_chunk = b""
-            right_done = True
+    l_pending = await _next(left_iter)
+    r_pending = await _next(right_iter)
 
-        if left_done and right_done:
-            return True
-        if left_done != right_done:
+    while l_pending is not None or r_pending is not None:
+        if l_pending is None or r_pending is None:
+            return False  # one stream exhausted, other not
+
+        n = min(len(l_pending), len(r_pending))
+        if l_pending[:n] != r_pending[:n]:
             return False
-        if left_chunk != right_chunk:
-            return False
+        l_pending = l_pending[n:]
+        r_pending = r_pending[n:]
+
+        if not l_pending:
+            l_pending = await _next(left_iter)
+        if not r_pending:
+            r_pending = await _next(right_iter)
+
+    return True

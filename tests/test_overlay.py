@@ -2,7 +2,7 @@
 
 import pytest
 
-from fsdantic import FileNotFoundError, FileOperations, MergeStrategy, OverlayOperations
+from fsdantic import FileNotFoundError, FileOperations, MergeStrategy, OverlayError, OverlayOperations
 
 
 @pytest.mark.asyncio
@@ -276,11 +276,14 @@ class TestOverlayOperationsReset:
         assert removed == 1
 
     async def test_reset_overlay_reports_errors(self, agent_fs):
-        """Should raise with details when paths fail to reset."""
+        """Should raise OverlayError with details when paths fail to reset."""
         ops = OverlayOperations()
 
-        with pytest.raises(RuntimeError, match="Failed to reset"):
+        with pytest.raises(OverlayError, match="Failed to reset") as exc_info:
             await ops.reset_overlay(agent_fs, paths=["/"])
+
+        assert exc_info.value.context is not None
+        assert "failed" in exc_info.value.context
 
 
 @pytest.mark.asyncio

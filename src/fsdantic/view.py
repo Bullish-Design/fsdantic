@@ -2,11 +2,10 @@
 
 import codecs
 import re
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from collections.abc import AsyncIterator
-from typing import Callable, Optional
 
 from agentfs_sdk import AgentFS
 from pydantic import BaseModel, Field
@@ -34,19 +33,19 @@ class SearchMatch:
     file: str
     line: int
     text: str
-    column: Optional[int] = None
-    match_start: Optional[int] = None
-    match_end: Optional[int] = None
+    column: int | None = None
+    match_start: int | None = None
+    match_end: int | None = None
 
 
 class ViewQuery(FileQuery):
     """Backward-compatible query model with content-search fields."""
 
-    content_pattern: Optional[str] = Field(
+    content_pattern: str | None = Field(
         None,
         description="Simple string pattern to search for in file contents",
     )
-    content_regex: Optional[str] = Field(
+    content_regex: str | None = Field(
         None,
         description="Regex pattern to search for in file contents",
     )
@@ -58,7 +57,7 @@ class ViewQuery(FileQuery):
         default=False,
         description="Match whole words only for content search",
     )
-    max_matches_per_file: Optional[int] = Field(
+    max_matches_per_file: int | None = Field(
         None,
         description="Limit matches per file (None = unlimited)",
     )
@@ -229,14 +228,12 @@ class View(BaseModel):
                     continue
             return matches
 
-        # Non-streaming path: load files with content
-        original_include = self.query.include_content
-        self.query.include_content = True
-
-        try:
-            files = await self.load()
-        finally:
-            self.query.include_content = original_include
+        # Non-streaming path: load files with content.  The query is
+        # never mutated in place (Views are otherwise immutable); a
+        # throwaway copy is used so concurrent callers observe no change.
+        content_query = self.query.model_copy(update={"include_content": True})
+        manager = FileManager(self.agent)
+        files = await manager.query(content_query)
 
         # Search each file
         for file in files:
@@ -321,7 +318,7 @@ class View(BaseModel):
         # Load file entries
         return [f for f in await self.load() if f.path in file_paths]
 
-    def with_size_range(self, min_size: Optional[int] = None, max_size: Optional[int] = None) -> "View":
+    def with_size_range(self, min_size: int | None = None, max_size: int | None = None) -> "View":
         """Create view with size constraints.
 
         Args:

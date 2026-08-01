@@ -1,21 +1,27 @@
-from __future__ import annotations
-
 """High-level operations for AgentFS overlay filesystems."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
-from enum import Enum
-from typing import TYPE_CHECKING, Optional, Protocol
+from enum import StrEnum
+from typing import TYPE_CHECKING, Protocol
 
 from agentfs_sdk import AgentFS, ErrnoException
 
 from ._internal.errors import translate_agentfs_error
+from ._internal.paths import join_normalized_path, normalize_path
+from .exceptions import OverlayError
 
 if TYPE_CHECKING:
     from .workspace import Workspace
 
 
-class MergeStrategy(str, Enum):
-    """Strategy for merging overlays."""
+class MergeStrategy(StrEnum):
+    """Strategy for merging overlays.
+
+    ``CALLBACK`` requires a conflict resolver; selecting it without one
+    raises :class:`OverlayError` when a conflict is encountered.
+    """
 
     OVERWRITE = "overwrite"  # Overlay wins on conflicts
     PRESERVE = "preserve"  # Base wins on conflicts
@@ -84,7 +90,7 @@ class OverlayOperations:
     def __init__(
         self,
         strategy: MergeStrategy = MergeStrategy.OVERWRITE,
-        conflict_resolver: Optional[ConflictResolver] = None,
+        conflict_resolver: ConflictResolver | None = None,
     ):
         """Initialize overlay operations.
 
@@ -100,7 +106,8 @@ class OverlayOperations:
         source: AgentFS,
         target: AgentFS,
         path: str = "/",
-        strategy: Optional[MergeStrategy] = None,
+        strategy: MergeStrategy | None = None,
+        conflict_resolver: ConflictResolver | None = None,
     ) -> MergeResult:
         """Merge source overlay into target filesystem.
 
@@ -109,15 +116,23 @@ class OverlayOperations:
             target: Target filesystem to merge into
             path: Root path to merge (default: "/")
             strategy: Override default merge strategy
+            conflict_resolver: Optional resolver used when ``strategy`` is
+                ``MergeStrategy.CALLBACK``.  Falls back to the resolver
+                configured at construction.
 
         Returns:
             MergeResult with statistics
+
+        Raises:
+            OverlayError: when ``CALLBACK`` is selected and no resolver is
+                available for a conflict.
 
         Examples:
             >>> # Merge agent overlay into stable
             >>> result = await ops.merge(agent_fs, stable_fs)
         """
         effective_strategy = strategy or self.strategy
+        effective_resolver = conflict_resolver if conflict_resolver is not None else self.conflict_resolver
 
         stats = {"files_merged": 0}
         conflicts = []
@@ -138,19 +153,17 @@ class OverlayOperations:
 
         if source_root_stat.is_file():
             await self._merge_file(
-                source, target, path, effective_strategy, stats, conflicts, errors
+                source, target, path, effective_strategy, stats, conflicts, errors, effective_resolver
             )
         elif source_root_stat.is_directory():
             # Recursively copy files from source to target
             await self._merge_recursive(
-                source, target, path, effective_strategy, stats, conflicts, errors
+                source, target, path, effective_strategy, stats, conflicts, errors, effective_resolver
             )
         else:
             errors.append((path, "Path is not a file or directory"))
 
-        return MergeResult(
-            files_merged=stats["files_merged"], conflicts=conflicts, errors=errors
-        )
+        return MergeResult(files_merged=stats["files_merged"], conflicts=conflicts, errors=errors)
 
     async def _merge_recursive(
         self,
@@ -161,6 +174,7 @@ class OverlayOperations:
         stats: dict,
         conflicts: list[MergeConflict],
         errors: list[tuple[str, str]],
+        conflict_resolver: ConflictResolver | None = None,
     ) -> None:
         """Recursively merge directory contents.
 
@@ -172,6 +186,7 @@ class OverlayOperations:
             stats: Stats dictionary to update
             conflicts: List to append conflicts to
             errors: List to append errors to
+            conflict_resolver: Optional resolver for CALLBACK strategy
         """
         context = f"OverlayOperations._merge_recursive(path={path!r})"
 
@@ -187,7 +202,7 @@ class OverlayOperations:
             return
 
         for entry_name in entries:
-            source_path = f"{path.rstrip('/')}/{entry_name}"
+            source_path = join_normalized_path(path, entry_name)
 
             try:
                 # Get source stats
@@ -204,11 +219,11 @@ class OverlayOperations:
                             raise translate_agentfs_error(e, context) from e
                         # Directory doesn't exist, create it
                         # Note: AgentFS mkdir creates parent dirs automatically
-                        await target.fs.mkdir(source_path.lstrip("/"))
+                        await target.fs.mkdir(source_path)
 
                     # Recurse
                     await self._merge_recursive(
-                        source, target, source_path, strategy, stats, conflicts, errors
+                        source, target, source_path, strategy, stats, conflicts, errors, conflict_resolver
                     )
                     continue
 
@@ -222,6 +237,7 @@ class OverlayOperations:
                         stats,
                         conflicts,
                         errors,
+                        conflict_resolver,
                     )
 
             except (RuntimeError, TypeError, ValueError) as e:
@@ -236,8 +252,14 @@ class OverlayOperations:
         stats: dict,
         conflicts: list[MergeConflict],
         errors: list[tuple[str, str]],
+        conflict_resolver: ConflictResolver | None = None,
     ) -> None:
-        """Merge a single file from source into target."""
+        """Merge a single file from source into target.
+
+        Raises:
+            OverlayError: when ``CALLBACK`` is selected and no resolver is
+                available for the conflict.
+        """
         try:
             source_content = await source.fs.read_file(source_path, encoding=None)
 
@@ -270,14 +292,18 @@ class OverlayOperations:
                     conflicts.append(conflict)
                     return
                 if strategy == MergeStrategy.CALLBACK:
-                    if self.conflict_resolver:
-                        source_content = self.conflict_resolver.resolve(conflict)
+                    if conflict_resolver is None:
+                        raise OverlayError(
+                            f"MergeStrategy.CALLBACK requires a conflict_resolver for conflict at '{source_path}'"
+                        )
+                    source_content = conflict_resolver.resolve(conflict)
                     conflicts.append(conflict)
                 # OVERWRITE: use source_content (default)
 
-            # Write to target
-            # Use relative path (strip leading /)
-            target_path = source_path.lstrip("/")
+            # Write to target using normalized absolute path (the SDK's
+            # path normalization adds a leading slash anyway, so this is
+            # self-consistent with the stat/read calls above).
+            target_path = normalize_path(source_path)
             await target.fs.write_file(target_path, source_content)
             stats["files_merged"] += 1
         except ErrnoException as e:
@@ -309,7 +335,7 @@ class OverlayOperations:
             try:
                 entries = await overlay.fs.readdir(current_path)
                 for entry_name in entries:
-                    full_path = f"{current_path.rstrip('/')}/{entry_name}"
+                    full_path = join_normalized_path(current_path, entry_name)
 
                     try:
                         stat = await overlay.fs.stat(full_path)
@@ -333,9 +359,7 @@ class OverlayOperations:
         await walk(path)
         return files
 
-    async def reset_overlay(
-        self, overlay: AgentFS, paths: Optional[list[str]] = None
-    ) -> int:
+    async def reset_overlay(self, overlay: AgentFS, paths: list[str] | None = None) -> int:
         """Remove files from overlay (reset to base state).
 
         Args:
@@ -359,9 +383,9 @@ class OverlayOperations:
         removed = 0
         errors: list[tuple[str, str]] = []
         for path in paths:
-            normalized_path = path.lstrip("/")
+            normalized_path = normalize_path(path)
             try:
-                stat = await overlay.fs.stat(path)
+                stat = await overlay.fs.stat(normalized_path)
 
                 if stat.is_directory():
                     await overlay.fs.rm(normalized_path, recursive=True)
@@ -378,11 +402,10 @@ class OverlayOperations:
                 errors.append((path, str(e)))
 
         if errors:
-            error_summary = "; ".join(
-                f"{error_path}: {error_message}" for error_path, error_message in errors
-            )
-            raise RuntimeError(
-                f"Failed to reset {len(errors)} overlay path(s): {error_summary}"
+            error_summary = "; ".join(f"{error_path}: {error_message}" for error_path, error_message in errors)
+            raise OverlayError(
+                f"Failed to reset {len(errors)} overlay path(s): {error_summary}",
+                context={"failed": errors},
             )
 
         return removed
@@ -394,36 +417,43 @@ class OverlayManager:
     def __init__(
         self,
         agent_fs: AgentFS,
-        operations: Optional[OverlayOperations] = None,
+        operations: OverlayOperations | None = None,
     ):
         self._agent_fs = agent_fs
         self._operations = operations or OverlayOperations()
 
     @staticmethod
-    def _resolve_agentfs(source: AgentFS | "Workspace") -> AgentFS:
+    def _resolve_agentfs(source: AgentFS | Workspace) -> AgentFS:
         """Resolve either Workspace or raw AgentFS into AgentFS."""
         raw = getattr(source, "raw", source)
         return raw
 
     async def merge(
         self,
-        source: AgentFS | "Workspace",
+        source: AgentFS | Workspace,
         path: str = "/",
-        strategy: Optional[MergeStrategy] = None,
+        strategy: MergeStrategy | None = None,
+        conflict_resolver: ConflictResolver | None = None,
     ) -> MergeResult:
-        """Merge ``source`` into this workspace's backing filesystem."""
+        """Merge ``source`` into this workspace's backing filesystem.
+
+        ``conflict_resolver`` is forwarded to the underlying
+        :class:`OverlayOperations` call (required for
+        ``MergeStrategy.CALLBACK``).
+        """
         source_fs = self._resolve_agentfs(source)
         return await self._operations.merge(
             source=source_fs,
             target=self._agent_fs,
             path=path,
             strategy=strategy,
+            conflict_resolver=conflict_resolver,
         )
 
     async def list_changes(self, path: str = "/") -> list[str]:
         """List changed files currently present in this workspace overlay."""
         return await self._operations.list_changes(self._agent_fs, path=path)
 
-    async def reset(self, paths: Optional[list[str]] = None) -> int:
+    async def reset(self, paths: list[str] | None = None) -> int:
         """Reset selected paths (or all paths) in this workspace overlay."""
         return await self._operations.reset_overlay(self._agent_fs, paths=paths)

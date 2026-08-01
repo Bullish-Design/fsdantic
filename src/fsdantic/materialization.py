@@ -2,26 +2,31 @@
 
 from __future__ import annotations
 
+import logging
 import shutil
+import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from errno import EXDEV
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING
 
 from agentfs_sdk import AgentFS, ErrnoException
 
 from ._internal.errors import translate_agentfs_error
-from ._internal.streaming import compare_streams, hash_stream
+from ._internal.streaming import compare_streams
 from .files import FileManager
 from .view import ViewQuery
 
 if TYPE_CHECKING:
     from .workspace import Workspace
 
+logger = logging.getLogger(__name__)
 
-class ConflictResolution(str, Enum):
+
+class ConflictResolution(StrEnum):
     """Strategy for handling file conflicts during materialization."""
 
     OVERWRITE = "overwrite"  # Overlay wins
@@ -42,8 +47,8 @@ class FileChange:
 
     path: str
     change_type: str  # "added", "modified", "deleted"
-    old_size: Optional[int] = None
-    new_size: Optional[int] = None
+    old_size: int | None = None
+    new_size: int | None = None
 
 
 @dataclass
@@ -51,7 +56,7 @@ class FileFingerprint:
     """Lightweight metadata snapshot for diff pre-checks."""
 
     size: int
-    mtime_ns: Optional[int] = None
+    mtime_ns: int | None = None
 
 
 @dataclass
@@ -94,8 +99,8 @@ class Materializer:
     def __init__(
         self,
         conflict_resolution: ConflictResolution = ConflictResolution.OVERWRITE,
-        progress_callback: Optional[Callable[[str, int, int], None]] = None,
-        allow_root: Optional[Path] = None,
+        progress_callback: Callable[[str, int, int], None] | None = None,
+        allow_root: Path | None = None,
     ):
         """Initialize materializer.
 
@@ -113,10 +118,10 @@ class Materializer:
         self,
         agent_fs: AgentFS,
         target_path: Path,
-        base_fs: Optional[AgentFS] = None,
-        filters: Optional[ViewQuery] = None,
+        base_fs: AgentFS | None = None,
+        filters: ViewQuery | None = None,
         clean: bool = True,
-        allow_root: Optional[Path] = None,
+        allow_root: Path | None = None,
     ) -> MaterializationResult:
         """Materialize AgentFS contents to disk.
 
@@ -131,6 +136,14 @@ class Materializer:
         Returns:
             MaterializationResult with statistics
 
+        Filter semantics:
+            - ``filters.path_pattern`` applies to files in both the base and
+              overlay layers.  Directories are always descended into, so
+              nested matches (e.g. ``src/**/*.py``) are found; empty
+              directories may still be created for filtered-out subtrees.
+            - Size constraints (``min_size``/``max_size``) are honored via
+              the stat pass; regex/content filters are not applied.
+
         Examples:
             >>> result = await materializer.materialize(
             ...     agent_fs=agent,
@@ -141,6 +154,7 @@ class Materializer:
             target_path=target_path,
             allow_root=allow_root or self.allow_root,
         )
+        self._recover_orphaned_staging(target_path)
         staging_path = target_path.parent / f"{target_path.name}.tmp-{uuid.uuid4().hex}"
 
         stats = {
@@ -151,6 +165,19 @@ class Materializer:
         skipped = []
         errors = []
 
+        # L14: pre-pass total for the progress callback (files that will be
+        # copied after filter application).  Falls back to -1 when the tree
+        # cannot be enumerated.
+        progress_total = -1
+        try:
+            counted = 0
+            if base_fs is not None:
+                counted += await self._count_files_for_progress(base_fs, filters)
+            counted += await self._count_files_for_progress(agent_fs, filters)
+            progress_total = counted
+        except ErrnoException:
+            pass
+
         try:
             if staging_path.exists():
                 shutil.rmtree(staging_path)
@@ -160,12 +187,33 @@ class Materializer:
             if not clean and target_path.exists():
                 shutil.copytree(target_path, staging_path, dirs_exist_ok=True)
 
-            # Materialize base layer first if provided
+            # Materialize base layer first if provided.  Filters apply to
+            # both layers so a filtered-out base file is intentionally absent.
             if base_fs is not None:
-                await self._copy_recursive(base_fs, "/", staging_path, stats, changes, skipped, errors)
+                await self._copy_recursive(
+                    base_fs,
+                    "/",
+                    staging_path,
+                    stats,
+                    changes,
+                    skipped,
+                    errors,
+                    filters=filters,
+                    progress_total=progress_total,
+                )
 
             # Materialize overlay layer
-            await self._copy_recursive(agent_fs, "/", staging_path, stats, changes, skipped, errors, filters=filters)
+            await self._copy_recursive(
+                agent_fs,
+                "/",
+                staging_path,
+                stats,
+                changes,
+                skipped,
+                errors,
+                filters=filters,
+                progress_total=progress_total,
+            )
 
             if not errors:
                 self._swap_staging_to_target(staging_path=staging_path, target_path=target_path)
@@ -183,7 +231,7 @@ class Materializer:
             errors=errors,
         )
 
-    def _validate_target_path(self, target_path: Path, allow_root: Optional[Path]) -> tuple[Path, Path]:
+    def _validate_target_path(self, target_path: Path, allow_root: Path | None) -> tuple[Path, Path]:
         """Validate target path and allowed boundary for safe materialization."""
         resolved_target = target_path.expanduser().resolve(strict=False)
         boundary = (allow_root or resolved_target.parent).expanduser().resolve(strict=False)
@@ -195,9 +243,7 @@ class Materializer:
         try:
             resolved_target.relative_to(boundary)
         except ValueError as e:
-            raise ValueError(
-                f"Target path {resolved_target} must be inside allow_root boundary {boundary}"
-            ) from e
+            raise ValueError(f"Target path {resolved_target} must be inside allow_root boundary {boundary}") from e
 
         return resolved_target, boundary
 
@@ -241,6 +287,43 @@ class Materializer:
         except OSError as e:
             errors.append((str(path), f"cleanup_failed: {e}"))
 
+    def _recover_orphaned_staging(self, target_path: Path) -> None:
+        """Recover or clean up orphaned staging/backup siblings (L13).
+
+        A crash between ``target -> .bak-*`` and ``staging -> target`` strands
+        the previous output as a ``.bak-*`` sibling.  This runs at the start
+        of :meth:`materialize`:
+
+        - If ``target_path`` is missing and exactly one ``.bak-*`` sibling
+          exists (any age), restore it and log a warning.
+        - Otherwise, remove stale ``.tmp-*`` staging dirs older than 24h.
+          A leftover ``.bak-*`` with a healthy target is removed too.
+
+        The rename swap itself remains non-atomic across concurrent processes;
+        this is best-effort single-process recovery.
+        """
+        name = target_path.name
+        parent = target_path.parent
+        backups = sorted(parent.glob(f"{name}.bak-*"))
+        stagings = sorted(parent.glob(f"{name}.tmp-*"))
+
+        if not target_path.exists() and len(backups) == 1:
+            backup = backups[0]
+            logger.warning("Restoring orphaned backup %s to %s", backup, target_path)
+            try:
+                backup.rename(target_path)
+                return
+            except OSError as exc:
+                logger.warning("Could not restore orphaned backup %s: %s", backup, exc)
+
+        cutoff = time.time() - 24 * 3600
+        for candidate in backups + stagings:
+            try:
+                if candidate.stat().st_mtime < cutoff:
+                    self._safe_cleanup(candidate, [])
+            except OSError:
+                pass
+
     async def diff(self, overlay_fs: AgentFS, base_fs: AgentFS, path: str = "/") -> list[FileChange]:
         """Compute changes between overlay and base.
 
@@ -251,6 +334,13 @@ class Materializer:
 
         Returns:
             List of FileChange objects
+
+        Semantics:
+            - ``added``: present in overlay, absent from base.
+            - ``modified``: present in both, different content/size.
+            - ``deleted``: present in base, absent from overlay.  This is a
+              *visibility delta*: materialize copies base first, so base-only
+              files still reach the output tree.
 
         Examples:
             >>> changes = await materializer.diff(agent_fs, stable_fs)
@@ -272,6 +362,22 @@ class Materializer:
         for file_path in overlay_set - base_set:
             changes.append(FileChange(path=file_path, change_type="added", new_size=overlay_files[file_path].size))
 
+        # Deleted files: present in base, absent from overlay.
+        #
+        # Semantics note: in the overlay model, "deleted" means "visible in
+        # base but not in overlay".  Materialization copies base first, then
+        # overlay, so base-only files ARE still materialized to disk; this is
+        # a *visibility delta*, not a prediction of what materialize will
+        # remove.
+        for file_path in base_set - overlay_set:
+            changes.append(
+                FileChange(
+                    path=file_path,
+                    change_type="deleted",
+                    old_size=base_files[file_path].size,
+                )
+            )
+
         # Modified files
         for file_path in overlay_set & base_set:
             overlay_meta = overlay_files[file_path]
@@ -288,25 +394,24 @@ class Materializer:
                 )
                 continue
 
-            # Hash-first comparison, then byte-accurate fallback on mismatch.
+            # Same size: single byte-accurate comparison pass (chunk-boundary
+            # independent).  A sha256 pre-pass was removed: it required two
+            # additional full reads for zero benefit (a hash collision is the
+            # only case where the old fallback would have fired).
             try:
-                overlay_hash = await hash_stream(overlay_manager.read_stream(file_path))
-                base_hash = await hash_stream(base_manager.read_stream(file_path))
-
-                if overlay_hash != base_hash:
-                    is_equal = await compare_streams(
-                        overlay_manager.read_stream(file_path),
-                        base_manager.read_stream(file_path),
-                    )
-                    if not is_equal:
-                        changes.append(
-                            FileChange(
-                                path=file_path,
-                                change_type="modified",
-                                old_size=base_meta.size,
-                                new_size=overlay_meta.size,
-                            )
+                is_equal = await compare_streams(
+                    overlay_manager.read_stream(file_path),
+                    base_manager.read_stream(file_path),
+                )
+                if not is_equal:
+                    changes.append(
+                        FileChange(
+                            path=file_path,
+                            change_type="modified",
+                            old_size=base_meta.size,
+                            new_size=overlay_meta.size,
                         )
+                    )
             except ErrnoException as e:
                 # If files disappear during diff, skip only missing files
                 if e.code != "ENOENT":
@@ -314,6 +419,26 @@ class Materializer:
                     raise translate_agentfs_error(e, context) from e
 
         return changes
+
+    async def _count_files_for_progress(
+        self,
+        source_fs: AgentFS,
+        filters: ViewQuery | None,
+    ) -> int:
+        """Count files that would be copied under ``filters`` (L14).
+
+        Applies the same path/size filter rules as :meth:`_copy_recursive`.
+        """
+        files = await self._list_all_files(source_fs, "/")
+        count = 0
+        for path, fingerprint in files.items():
+            if filters is not None:
+                if not filters.matches_path(path):
+                    continue
+                if not filters.matches_size(fingerprint):
+                    continue
+            count += 1
+        return count
 
     async def _copy_recursive(
         self,
@@ -324,7 +449,8 @@ class Materializer:
         changes: list[FileChange],
         skipped: list[str],
         errors: list[tuple[str, str]],
-        filters: Optional[ViewQuery] = None,
+        filters: ViewQuery | None = None,
+        progress_total: int = -1,
     ) -> None:
         """Recursively copy files from AgentFS to disk.
 
@@ -336,7 +462,11 @@ class Materializer:
             changes: List to append changes to
             skipped: List to append skipped files to
             errors: List to append errors to
-            filters: Optional filters to apply
+            filters: Optional filters to apply.  Only files are filtered
+                (directories are always descended into); size constraints
+                are also honored via the stat pass.
+            progress_total: Total files expected for progress reporting
+                (``-1`` when unknown).
         """
         context = f"Materializer._copy_recursive(src_path={src_path!r})"
 
@@ -355,11 +485,15 @@ class Materializer:
             entry_path = f"{src_path.rstrip('/')}/{entry_name}"
 
             try:
-                # Get stats
+                # Get stats first: we must know the entry type to decide
+                # whether to descend or filter.
                 stat = await source_fs.fs.stat(entry_path)
 
+                # Directories are always descended into so that patterns like
+                # ``src/**/*.py`` still find nested matches (glob semantics
+                # are file-oriented).  Consequence: empty directories may
+                # still be created for filtered-out subtrees.
                 if stat.is_directory():
-                    # Create directory and recurse
                     local_dir = dest_path / entry_name
                     local_dir.mkdir(exist_ok=True)
                     await self._copy_recursive(
@@ -371,8 +505,18 @@ class Materializer:
                         skipped,
                         errors,
                         filters,
+                        progress_total,
                     )
-                elif stat.is_file():
+                    continue
+
+                # H1: apply the path filter before any read work for files.
+                if filters is not None and not filters.matches_path(entry_path):
+                    continue
+                # H1: size filters are free here because stats are already fetched.
+                if filters is not None and not filters.matches_size(stat):
+                    continue
+
+                if stat.is_file():
                     # Copy file
                     local_file = dest_path / entry_name
 
@@ -388,6 +532,14 @@ class Materializer:
                     # Read content
                     content = await source_fs.fs.read_file(entry_path, encoding=None)
 
+                    # L14: label truthfully — "modified" when a file of a
+                    # different size already exists at the destination
+                    # (no-clean runs seeding the staging tree), else "added".
+                    pre_existing_size = local_file.stat().st_size if local_file.exists() else None
+                    change_type = (
+                        "modified" if pre_existing_size is not None and pre_existing_size != len(content) else "added"
+                    )
+
                     # Write to disk
                     local_file.write_bytes(content)
 
@@ -396,11 +548,18 @@ class Materializer:
                     stats["bytes_written"] += len(content)
 
                     # Track change
-                    changes.append(FileChange(path=entry_path, change_type="added", new_size=len(content)))
+                    changes.append(
+                        FileChange(
+                            path=entry_path,
+                            change_type=change_type,
+                            old_size=pre_existing_size,
+                            new_size=len(content),
+                        )
+                    )
 
                     # Progress callback
                     if self.progress_callback:
-                        self.progress_callback(entry_path, stats["files_written"], -1)
+                        self.progress_callback(entry_path, stats["files_written"], progress_total)
 
             except ErrnoException as e:
                 context = f"Materializer._copy_recursive(entry_path={entry_path!r})"
@@ -457,12 +616,12 @@ class Materializer:
 class MaterializationManager:
     """Workspace-facing materialization API backed by :class:`Materializer`."""
 
-    def __init__(self, agent_fs: AgentFS, materializer: Optional[Materializer] = None):
+    def __init__(self, agent_fs: AgentFS, materializer: Materializer | None = None):
         self._agent_fs = agent_fs
         self._materializer = materializer or Materializer()
 
     @staticmethod
-    def _resolve_agentfs(source: AgentFS | "Workspace") -> AgentFS:
+    def _resolve_agentfs(source: AgentFS | Workspace) -> AgentFS:
         """Resolve either Workspace or raw AgentFS into AgentFS."""
         raw = getattr(source, "raw", source)
         return raw
@@ -471,10 +630,10 @@ class MaterializationManager:
         self,
         target_path: Path,
         *,
-        base: AgentFS | "Workspace" | None = None,
-        filters: Optional[ViewQuery] = None,
+        base: AgentFS | Workspace | None = None,
+        filters: ViewQuery | None = None,
         clean: bool = True,
-        allow_root: Optional[Path] = None,
+        allow_root: Path | None = None,
     ) -> MaterializationResult:
         """Materialize this workspace to disk, optionally layering a base workspace."""
         base_fs = self._resolve_agentfs(base) if base is not None else None
@@ -489,7 +648,7 @@ class MaterializationManager:
 
     async def diff(
         self,
-        base: AgentFS | "Workspace",
+        base: AgentFS | Workspace,
         *,
         path: str = "/",
     ) -> list[FileChange]:
@@ -503,7 +662,7 @@ class MaterializationManager:
 
     async def preview(
         self,
-        base: AgentFS | "Workspace",
+        base: AgentFS | Workspace,
         *,
         path: str = "/",
     ) -> list[FileChange]:
