@@ -3,16 +3,17 @@
   "unit": "ms",
   "scenarios": {
     "file_read_average_latency": {
-      "median_ms": 2.5
+      "median_ms": 4.69
     },
     "file_write_average_latency": {
-      "median_ms": 3.0
+      "median_ms": 8.03
     },
     "view_count_latency": {
-      "median_ms": 110.0
+      "median_ms": 972.32
     },
     "view_query_without_content_latency": {
-      "median_ms": 95.0
+      "median_ms": 870.28
     }
-  }
+  },
+  "note": "Post-0.4.0 refactor baseline. Values are machine-specific; the phase8 gate compares regression deltas against this artifact on the same machine."
 }
