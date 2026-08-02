@@ -39,7 +39,8 @@ fsdantic/
 
 ### Core Dependencies
 
-- **agentfs-sdk** >= 0.6.4 - AgentFS virtual filesystem
+- **agentfs-sdk** (fork of upstream v0.6.4, tag `v0.6.4-pyturso-0.7.2`, pyturso pin bumped) - AgentFS virtual filesystem
+- **pyturso** >= 0.7.2 - Turso/libSQL driver (GIL-releasing busy-wait)
 - **pydantic** >= 2.0.0 - Data validation and serialization
 
 ---

@@ -4,6 +4,11 @@ Fsdantic's concurrency behavior is configured entirely through
 [`Fsdantic.open`](../src/fsdantic/client.py) (`enable_wal`, `enable_mvcc`,
 `busy_timeout_ms`). This page documents the semantics.
 
+> Driver note: fsdantic consumes pyturso **>= 0.7.2** (via the
+> `Bullish-Design/agentfs` SDK fork, which bumps upstream's `pyturso==0.4.4`
+> pin). The behaviors below are verified against 0.7.2; the only documented
+> 0.4.4-specific caveat (GIL-holding busy-wait) no longer applies.
+
 ## Single connection
 
 Each `turso.aio.Connection` serializes its own operations via a dedicated
@@ -23,19 +28,21 @@ sequential async access on a single connection.
 - Pass `busy_timeout_ms=0` to disable the wait (the raw turso default:
   fail immediately on contention).
 
-### pyturso 0.4.4 limitation (busy-wait holds the GIL)
+### Busy-wait on contention (pyturso >= 0.7.2)
 
 A contended async write busy-waits inside pyturso's native libSQL layer
-**without releasing the GIL**: the event loop (and every other Python
-thread in the process) is frozen for up to `busy_timeout_ms` before the
-write either succeeds (only if the lock is released by something outside
-the process) or raises `OperationalError: database is locked`.  Because
-pyturso's local libSQL build also takes a file-level lock at `connect()`
-(no concurrent multi-process access to a database file), an in-process
-writer cannot be unblocked from another thread — in practice a single
-process sees contention as "freeze for up to `busy_timeout_ms`, then
-raise".  `busy_timeout_ms` still bounds that freeze; `0` makes it fail
-instantly.
+**with the GIL released**: the event loop and other Python threads stay
+responsive during the wait (verified by probe — a watchdog thread keeps
+running and an in-process lock release from another connection unblocks
+the waiter).  The write then **succeeds** once the lock is released,
+"wait, then succeed" being the normal contention outcome, bounded by
+`busy_timeout_ms`.  If the lock is not released within the timeout the
+write raises `OperationalError: database is locked`.
+
+Multi-process caveat (unchanged from pyturso 0.4.4, verified on 0.7.2):
+pyturso's local libSQL build takes a file-level lock at `connect()` —
+concurrent multi-process access to a database file is still not
+supported.  `busy_timeout_ms=0` disables the wait (fail immediately).
 
 ## MVCC (`enable_mvcc=True`)
 

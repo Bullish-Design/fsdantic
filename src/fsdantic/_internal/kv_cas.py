@@ -12,7 +12,7 @@ agentfs-sdk is pinned ``>=0.6.4`` and this schema is stable (see
 format are part of the coupling contract; keep this file in sync with any
 upstream schema change.
 
-Commit semantics (verified against pyturso 0.4.4)::
+Commit semantics (verified against pyturso 0.7.2; unchanged from 0.4.4)::
 
     - ``cursor.rowcount`` is accurate for INSERT ... ON CONFLICT DO NOTHING
       (1 on insert, 0 on conflict) and for UPDATE ... WHERE key=? AND value=?

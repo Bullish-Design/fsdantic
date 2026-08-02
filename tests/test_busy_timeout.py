@@ -4,15 +4,14 @@
 busy_timeout = {ms}`` on every connection created through the unified open
 seam.  Default 5000; ``0`` disables the wait (the raw turso default).
 
-pyturso 0.4.4 limitation (documented in ``docs/concurrency.md``): a
-contended async write busy-waits inside the native libSQL layer without
-releasing the GIL — the event loop is frozen for up to ``busy_timeout_ms``
-before the write fails with "database is locked".  An in-process lock
-release cannot run while a waiter waits, and pyturso's local libSQL does
-not support concurrent multi-process access to a DB file, so the
-"waits then succeeds" scenario is not orchestratable here.  These tests
-pin the observable contract instead: the value is applied, ``0`` fails
-fast, and a non-zero timeout bounds the wait before the failure.
+On pyturso >= 0.7.2 (the pinned driver; see ``docs/concurrency.md``) a
+contended async write busy-waits **with the GIL released**: the event loop
+stays responsive and an in-process lock release from another connection
+unblocks the waiter, so the "waits then succeeds" scenario is
+orchestratable (see ``test_two_writers_waits_then_succeeds``).  These
+tests pin the contract: the value is applied, ``0`` fails fast, a non-zero
+timeout bounds the wait before the failure, and an in-process release lets
+a waiting writer succeed.
 """
 
 import asyncio
@@ -68,10 +67,8 @@ class TestTwoWriters:
         """A contended writer waits (not fails instantly) and the wait is
         bounded by busy_timeout_ms before raising "database is locked".
 
-        In-process lock release during the wait is impossible on pyturso
-        0.4.4 (the native busy-wait holds the GIL), so the observable
-        contract is: the failure is delayed by ~busy_timeout_ms rather than
-        immediate.
+        ws1 never releases the lock, so the observable contract is: the
+        failure is delayed by ~busy_timeout_ms rather than immediate.
         """
         ws1 = await Fsdantic.open(path=temp_db_path, busy_timeout_ms=700)
         ws2 = await Fsdantic.open(path=temp_db_path, busy_timeout_ms=700)
@@ -94,6 +91,46 @@ class TestTwoWriters:
             assert "locked" in str(exc_info.value).lower()
             assert elapsed >= 0.4
             assert elapsed <= 2.5
+        finally:
+            await ws1.connection.rollback()
+            await ws1.close()
+            await ws2.close()
+
+    async def test_two_writers_waits_then_succeeds(self, temp_db_path):
+        """On pyturso >= 0.7.2 the busy-wait releases the GIL, so an
+        in-process lock release unblocks a waiting writer: ws2's write waits
+        for the lock and then SUCCEEDS once ws1 rolls back.
+
+        This "waits then succeeds" scenario was not orchestratable on
+        pyturso 0.4.4, where the busy-wait held the GIL and the release
+        could not run until the wait timed out.
+        """
+        ws1 = await Fsdantic.open(path=temp_db_path, busy_timeout_ms=3000)
+        ws2 = await Fsdantic.open(path=temp_db_path, busy_timeout_ms=3000)
+        try:
+            await ws1.files.write("/init.txt", "init")
+
+            # ws1 acquires and holds the write lock; ws2's write enters the
+            # busy-wait and cannot complete until ws1 releases.
+            await ws1.connection.execute("BEGIN IMMEDIATE")
+            await ws1.connection.execute("UPDATE fs_inode SET mtime = mtime WHERE ino = 1")
+
+            start = time.monotonic()
+            writer = asyncio.create_task(ws2.files.write("/released.txt", "data"))
+
+            # Give ws2 a moment to enter the busy-wait, then release the
+            # lock from ws1.  On pyturso >= 0.7.2 this rollback runs while
+            # ws2 waits (GIL released), so ws2 unblocks and succeeds.
+            await asyncio.sleep(0.25)
+            await ws1.connection.rollback()
+
+            await writer
+            elapsed = time.monotonic() - start
+
+            # The write succeeded after waiting ~0.25s (well under the
+            # 3000 ms timeout), proving the in-process release unblocked it.
+            assert elapsed < 2.5
+            assert await ws2.files.read("/released.txt", mode="text") == "data"
         finally:
             await ws1.connection.rollback()
             await ws1.close()

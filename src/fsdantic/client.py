@@ -10,9 +10,11 @@ Concurrency contract
   writer on the same database file.  When a writer contends for the write
   lock it waits up to ``busy_timeout_ms`` (default 5000) instead of failing
   immediately; pass ``busy_timeout_ms=0`` to disable the wait (matching the
-  turso default).  Caveat (pyturso 0.4.4): the busy-wait holds the GIL —
-  the event loop is frozen for up to ``busy_timeout_ms`` while waiting,
-  and concurrent multi-process access to a DB file is not supported.
+  turso default).  On pyturso >= 0.7.2 (the version fsdantic pins via the
+  agentfs-sdk fork) the busy-wait releases the GIL: the event loop stays
+  responsive and an in-process lock release can unblock the waiter, so
+  "wait, then succeed" is the normal contention outcome.  Concurrent
+  multi-process access to a DB file is still not supported.
 * **MVCC** (``enable_mvcc=True``, ``BEGIN CONCURRENT``): multiple
   connections can write concurrently.  Non-conflicting writes succeed;
   conflicting writes raise ``DatabaseError`` at **execute** time — callers
@@ -215,7 +217,8 @@ class Fsdantic:
             # Hard backstop on the underlying connection: even statements
             # that reach it without passing the guard (e.g. via a raw
             # ``cursor()``) are rejected by libSQL.  Note the numeric 1:
-            # ``PRAGMA query_only = ON`` fails to parse on pyturso 0.4.4.
+            # ``PRAGMA query_only = ON`` fails to parse on pyturso (verified
+            # on both 0.4.4 and 0.7.2).
             await conn.execute("PRAGMA query_only = 1")
 
         return Workspace(

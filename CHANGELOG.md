@@ -6,19 +6,29 @@ All notable changes to fsdantic are documented in this file.
 
 ### Changed
 
-- **agentfs-sdk floor raised to 0.6.4** — `pyproject.toml` now declares
-  `agentfs-sdk>=0.6.4,<0.7` (was `>=0.6.0`).  All released agentfs-sdk
-  0.6.x wheels (0.6.2/0.6.3/0.6.4) are byte-identical to the vendored 0.6.0
-  module code (`.context/agentfs-main/sdk/python`) — only the `__version__`
-  string differs — so this is a metadata-only bump: the full test suite was
-  re-run green against the released 0.6.4 package in a clean venv (432
-  passed, 4 skipped).  The upper bound `<0.7` pins the tested 0.6.x line.
-
-  pyturso interaction: every released agentfs-sdk (including 0.6.4) pins
-  `pyturso==0.4.4`, so pyturso remains at 0.4.4 — the documented 0.4.4
-  behaviors (busy-wait GIL hold, `PRAGMA query_only = 1` parsing, no
-  `readonly` connect param, `fetchone()` read-transaction semantics, ...)
-  are unchanged and the existing docs/comments remain accurate.
+- **agentfs-sdk is now consumed from the `Bullish-Design/agentfs` fork**
+  (`git+https://github.com/Bullish-Design/agentfs@v0.6.4-pyturso-0.7.2`,
+  subdirectory `sdk/python`) instead of the PyPI release.  The fork is
+  upstream v0.6.4 code unchanged, with a single patch: its
+  `pyturso==0.4.4` pin is bumped to `pyturso>=0.7.2,<0.8`.  fsdantic also
+  declares `pyturso>=0.7.2,<0.8` explicitly so published installs resolve
+  the tested driver.  (Upstream 0.6.4 still pins pyturso 0.4.4; the fork
+  is the only way a coherent dependency graph can carry pyturso 0.7.2.)
+- **pyturso is now 0.7.2**, which **releases the GIL during the contended
+  busy-wait** (verified by probe: an in-process lock release from another
+  connection unblocks a waiting writer and the event loop stays
+  responsive).  The F2 caveat — "the event loop is frozen for up to
+  `busy_timeout_ms`" — is removed from the `client` module docstring and
+  `docs/concurrency.md`; `TestTwoWriters` gains
+  `test_two_writers_waits_then_succeeds`, which orchestrates the "waits
+  then succeeds" scenario that was impossible on pyturso 0.4.4.
+- Verified unchanged on 0.7.2: `connect()` signature (no `readonly`
+  param), `PRAGMA query_only = ON` parse failure (`= 1` still required),
+  CAS `rowcount` accuracy, the `fetchone()` read-transaction caveat, and
+  the local libSQL file lock at `connect()` (still no multi-process
+  access).  `UPDATE ... SET x = (subquery)` is now accepted (previously
+  rejected on 0.4.4); `test_readonly.py`'s subquery workaround remains
+  valid either way.
 
 ## [0.5.0] - 2026-08-01
 

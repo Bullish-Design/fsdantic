@@ -11,8 +11,9 @@ authors = [
 ]
 
 dependencies = [
-    "agentfs-sdk>=0.6.4,<0.7",
+    "agentfs-sdk @ git+https://github.com/Bullish-Design/agentfs@v0.6.4-pyturso-0.7.2#subdirectory=sdk/python",
     "pydantic>=2.0.0",
+    "pyturso>=0.7.2,<0.8",
 ]
 
 [project.optional-dependencies]
