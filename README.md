@@ -46,6 +46,77 @@ Use `async with` so the workspace is always closed cleanly.
 
 ---
 
+## Concurrency & read-only
+
+Concurrency and read-only behavior are configured at open time via
+`Fsdantic.open(...)` (`enable_wal`, `enable_mvcc`, `busy_timeout_ms`,
+`readonly`). The full contract is documented in
+[`docs/concurrency.md`](docs/concurrency.md).
+
+### WAL mode (default)
+
+```python
+# enable_wal=True is the default: unlimited concurrent readers alongside a
+# single writer on the same database file.  A contended write waits up to
+# busy_timeout_ms (default 5000) instead of failing immediately with
+# "database is locked".
+workspace = await Fsdantic.open(id="my-agent")  # WAL, busy_timeout_ms=5000
+
+# busy_timeout_ms=0 disables the wait (fail fast, the raw turso default)
+workspace = await Fsdantic.open(id="my-agent", busy_timeout_ms=0)
+```
+
+On pyturso 0.7.2 (see [`docs/dependencies.md`](docs/dependencies.md)) the
+busy-wait releases the GIL, so the event loop and other threads stay
+responsive while a writer waits — and an in-process lock release unblocks
+the waiter, so "wait, then succeed" is the normal contention outcome. Each
+connection serializes its own operations via a dedicated worker thread, so
+no application-level locking is needed for sequential async access on a
+single workspace.
+
+### MVCC (`enable_mvcc=True`)
+
+```python
+workspace = await Fsdantic.open(id="my-agent", enable_mvcc=True)
+```
+
+Enables libSQL MVCC journaling (`PRAGMA journal_mode = "mvcc"`): multiple
+connections can write concurrently without lock contention and
+`BEGIN CONCURRENT` transactions are accepted. Caveat (verified on pyturso
+0.7.2): each connection opens an **independent MVCC store**, so write-write
+conflicts are **not reliably surfaced** by the driver — concurrent
+same-row writes are effectively last-write-wins with no error to catch and
+retry on. For atomic read-modify-write sequences use
+[`Workspace.serialized()`](src/fsdantic/workspace.py) (a same-process
+per-workspace lock) or the repository's SQL compare-and-set
+(`compare_and_set`, versioned `save()`).
+
+```python
+async with workspace.serialized():
+    current = await workspace.kv.get("counter", default=0)
+    await workspace.kv.set("counter", current + 1)
+```
+
+### Read-only workspaces
+
+```python
+workspace = await Fsdantic.open(path="app.db", readonly=True)
+
+text = await workspace.files.read("/readme.txt")  # reads work
+await workspace.files.write("/x.txt", "x")  # raises WorkspaceError
+```
+
+- Writes — through the manager APIs (`files.write`, `kv.set`,
+  `overlay.merge`, `materialize.to_disk`, ...) or raw write statements on
+  `workspace.connection` — raise `WorkspaceError` with
+  `code="WORKSPACE_READONLY"`.
+- Reads never write: the SDK's access-time maintenance write is
+  neutralized on read-only workspaces.
+- The database file must already exist; opening a missing DB raises
+  `WorkspaceError` with `code="WORKSPACE_NOT_FOUND"`.
+
+---
+
 ## Core flows
 
 ### 1) File operations
