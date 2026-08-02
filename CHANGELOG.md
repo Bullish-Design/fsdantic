@@ -2,7 +2,7 @@
 
 All notable changes to fsdantic are documented in this file.
 
-## [Unreleased]
+## [0.7.0] - 2026-08-02
 
 ### Added
 
@@ -15,6 +15,12 @@ All notable changes to fsdantic are documented in this file.
   with `list_tombstones()`/`clear_tombstone()`/`clear_tombstones()`; they
   persist until cleared or the file is re-created in the source (which
   makes the marker inert).
+
+### Fixed
+
+- `normalize_path()` is now a normalization fixed point: a trailing
+  whitespace segment (e.g. `"0 \\"`) no longer survives as a dangling
+  space, matching the existing `strip()` contract.
 
 ## [0.6.0] - 2026-08-02
 

@@ -314,4 +314,4 @@ class TestVersion:
     """L17: version drift fixed."""
 
     def test_version_matches_package(self):
-        assert __version__ == "0.6.0"
+        assert __version__ == "0.7.0"
