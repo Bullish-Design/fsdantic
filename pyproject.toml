@@ -11,7 +11,7 @@ authors = [
 ]
 
 dependencies = [
-    "agentfs-sdk>=0.6.0",
+    "agentfs-sdk>=0.6.4,<0.7",
     "pydantic>=2.0.0",
 ]
 

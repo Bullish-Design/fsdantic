@@ -2,6 +2,24 @@
 
 All notable changes to fsdantic are documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- **agentfs-sdk floor raised to 0.6.4** — `pyproject.toml` now declares
+  `agentfs-sdk>=0.6.4,<0.7` (was `>=0.6.0`).  All released agentfs-sdk
+  0.6.x wheels (0.6.2/0.6.3/0.6.4) are byte-identical to the vendored 0.6.0
+  module code (`.context/agentfs-main/sdk/python`) — only the `__version__`
+  string differs — so this is a metadata-only bump: the full test suite was
+  re-run green against the released 0.6.4 package in a clean venv (432
+  passed, 4 skipped).  The upper bound `<0.7` pins the tested 0.6.x line.
+
+  pyturso interaction: every released agentfs-sdk (including 0.6.4) pins
+  `pyturso==0.4.4`, so pyturso remains at 0.4.4 — the documented 0.4.4
+  behaviors (busy-wait GIL hold, `PRAGMA query_only = 1` parsing, no
+  `readonly` connect param, `fetchone()` read-transaction semantics, ...)
+  are unchanged and the existing docs/comments remain accurate.
+
 ## [0.5.0] - 2026-08-01
 
 ### Added

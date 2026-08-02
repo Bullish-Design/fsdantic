@@ -39,7 +39,7 @@ fsdantic/
 
 ### Core Dependencies
 
-- **agentfs-sdk** >= 0.6.0 - AgentFS virtual filesystem
+- **agentfs-sdk** >= 0.6.4 - AgentFS virtual filesystem
 - **pydantic** >= 2.0.0 - Data validation and serialization
 
 ---

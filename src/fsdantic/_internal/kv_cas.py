@@ -6,7 +6,7 @@ Coupling note: these statements target the AgentFS kv_store schema::
              created_at INTEGER DEFAULT (unixepoch()),
              updated_at INTEGER DEFAULT (unixepoch()))
 
-agentfs-sdk is pinned ``>=0.6.0`` and this schema is stable (see
+agentfs-sdk is pinned ``>=0.6.4`` and this schema is stable (see
 ``sdk/python/agentfs_sdk/kvstore.py`` in the vendored SDK under
 ``.context/agentfs-main/``).  The column names and the JSON-text payload
 format are part of the coupling contract; keep this file in sync with any
