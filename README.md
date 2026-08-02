@@ -19,6 +19,12 @@ uv add fsdantic
 pip install fsdantic
 ```
 
+> **Dependency note:** fsdantic consumes the `Bullish-Design/agentfs` SDK fork
+> (upstream v0.6.4 code with the pyturso pin bumped) to carry pyturso 0.7.2,
+> which the upstream SDK's `pyturso==0.4.4` pin would otherwise block.  See
+> [`docs/dependencies.md`](docs/dependencies.md) for the rationale and the
+> fork-refresh procedure.
+
 ## Quickstart (workspace lifecycle)
 
 ```python
