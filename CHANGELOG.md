@@ -2,7 +2,7 @@
 
 All notable changes to fsdantic are documented in this file.
 
-## [Unreleased]
+## [0.6.0] - 2026-08-02
 
 ### Changed
 
