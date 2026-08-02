@@ -6,6 +6,14 @@ All notable changes to fsdantic are documented in this file.
 
 ### Added
 
+- **`busy_timeout_ms` parameter** — `Fsdantic.open(..., busy_timeout_ms=5000)`
+  applies `PRAGMA busy_timeout = {ms}` on every connection created through
+  the unified open seam (default 5000; `0` disables the wait).  Exposed as
+  `Workspace.busy_timeout_ms`.  The MVCC/WAL conflict contract is documented
+  in the `client` module docstring and `docs/concurrency.md`. (F2)
+- **`Workspace.serialized()`** — a per-workspace `asyncio.Lock`
+  asynccontextmanager primitive for same-process serialization of
+  read-modify-write sequences.  Callers own the policy of when to use it. (F2)
 - **`readonly` workspace mode** — `Fsdantic.open(..., readonly=True)` opens a
   workspace for read-only inspection.  Write operations raise
   `WorkspaceError` (`WORKSPACE_READONLY`) at the manager API boundary
@@ -25,6 +33,10 @@ All notable changes to fsdantic are documented in this file.
   paths (single unified seam): resolve path → `turso_connect` → WAL enable →
   `_ReadonlyGuard` wrap → `AgentFS.open_with`.  `open_with_options` remains
   SDK-direct and does not support `readonly` (documented). (F1)
+- Documented the pyturso 0.4.4 busy-wait caveat: a contended async write
+  holds the GIL for up to `busy_timeout_ms` (event loop frozen) before
+  failing with "database is locked"; concurrent multi-process access to a
+  DB file is not supported by the local libSQL build. (F2)
 - `Workspace.connection` on readonly workspaces returns the connection guard:
   read PRAGMAs pass through, write statements are rejected. (F1)
 - `Workspace`, `FileManager`, `KVManager`, `OverlayManager`, and

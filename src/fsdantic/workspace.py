@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 from agentfs_sdk import AgentFS
@@ -18,13 +21,20 @@ if TYPE_CHECKING:
 class Workspace:
     """Unified runtime façade around an AgentFS instance."""
 
-    def __init__(self, raw: AgentFS, readonly: bool = False):
+    def __init__(
+        self,
+        raw: AgentFS,
+        readonly: bool = False,
+        busy_timeout_ms: int | None = None,
+    ):
         self._raw = raw
         self._readonly = readonly
+        self._busy_timeout_ms = busy_timeout_ms
         self._files: FileManager | None = None
         self._kv: KVManager | None = None
         self._overlay: OverlayManager | None = None
         self._materialize: MaterializationManager | None = None
+        self._serialize_lock = asyncio.Lock()
         self._closed = False
 
     @property
@@ -42,6 +52,17 @@ class Workspace:
         guard).
         """
         return self._readonly
+
+    @property
+    def busy_timeout_ms(self) -> int | None:
+        """The write-lock busy timeout (ms) configured at open time.
+
+        Set by :meth:`Fsdantic.open` (default 5000; ``0`` disables the
+        wait).  ``None`` when the workspace was constructed directly or via
+        ``open_with_options`` (no timeout configured — the raw turso
+        default of 0 applies).
+        """
+        return self._busy_timeout_ms
 
     @property
     def connection(self) -> TursoConnection:
@@ -87,6 +108,24 @@ class Workspace:
         if self._materialize is None:
             self._materialize = MaterializationManager(self._raw, readonly=self._readonly)
         return self._materialize
+
+    @asynccontextmanager
+    async def serialized(self) -> AsyncIterator[None]:
+        """Serialize concurrent async access to this workspace.
+
+        Yields while holding a per-workspace ``asyncio.Lock``.  This is a
+        *primitive* for same-process coordination (e.g. atomic
+        read-modify-write sequences on shared keys): callers own the policy
+        of when it is needed.  It does NOT coordinate across processes or
+        connections — use MVCC retries for that.
+
+        Examples:
+            >>> async with workspace.serialized():
+            ...     current = await workspace.kv.get("counter")
+            ...     await workspace.kv.set("counter", current + 1)
+        """
+        async with self._serialize_lock:
+            yield
 
     async def close(self) -> None:
         """Close the workspace exactly once."""

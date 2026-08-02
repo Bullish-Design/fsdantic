@@ -1,4 +1,24 @@
-"""High-level fsdantic client entrypoint."""
+"""High-level fsdantic client entrypoint.
+
+Concurrency contract
+--------------------
+
+* **Single connection**: each ``turso.aio.Connection`` serializes its own
+  operations via a dedicated worker thread — no application-level locking
+  is needed for sequential async access on a single connection.
+* **WAL mode** (default): unlimited concurrent readers alongside a single
+  writer on the same database file.  When a writer contends for the write
+  lock it waits up to ``busy_timeout_ms`` (default 5000) instead of failing
+  immediately; pass ``busy_timeout_ms=0`` to disable the wait (matching the
+  turso default).  Caveat (pyturso 0.4.4): the busy-wait holds the GIL —
+  the event loop is frozen for up to ``busy_timeout_ms`` while waiting,
+  and concurrent multi-process access to a DB file is not supported.
+* **MVCC** (``enable_mvcc=True``, ``BEGIN CONCURRENT``): multiple
+  connections can write concurrently.  Non-conflicting writes succeed;
+  conflicting writes raise ``DatabaseError`` at **execute** time — callers
+  must catch it and retry the write.  See :meth:`Workspace.serialized` for
+  a same-process serialization primitive; cairn owns the retry policy.
+"""
 
 from __future__ import annotations
 
@@ -70,6 +90,7 @@ class Fsdantic:
         enable_wal: bool = True,
         enable_mvcc: bool = False,
         readonly: bool = False,
+        busy_timeout_ms: int = 5000,
     ) -> Workspace:
         """Open a workspace by ID or path with optional concurrency and
         read-only configuration.
@@ -92,13 +113,19 @@ class Fsdantic:
                 database file must already exist (``WORKSPACE_NOT_FOUND``
                 otherwise).  Reads never write: the SDK's access-time
                 maintenance write is neutralized.
+            busy_timeout_ms: Maximum milliseconds a write waits on a
+                contended write lock before failing with "database is
+                locked".  Default 5000.  Pass ``0`` to disable the wait
+                (fail immediately, the raw turso default); negative values
+                leave the timeout untouched.
 
-        Concurrency notes:
-            * **WAL mode** (default): unlimited concurrent readers alongside
-              a single writer on the same database file.
-            * **MVCC mode**: multiple connections can write concurrently.
-              Non-conflicting writes succeed; conflicting writes raise
-              ``DatabaseError`` at execute time.
+        Concurrency contract (see the module docstring):
+
+            * **WAL mode** (default): unlimited readers, single writer;
+              the writer waits up to ``busy_timeout_ms`` on contention.
+            * **MVCC mode**: multiple connections can write concurrently;
+              conflicting writes raise ``DatabaseError`` at execute time
+              (callers must catch and retry).
             * Each ``turso.aio.Connection`` serializes its own operations
               via a dedicated worker thread — no application-level locking
               is needed for sequential async access on a single connection.
@@ -112,6 +139,7 @@ class Fsdantic:
             enable_wal=enable_wal,
             enable_mvcc=enable_mvcc,
             readonly=readonly,
+            busy_timeout_ms=busy_timeout_ms,
         )
 
     @classmethod
@@ -122,12 +150,13 @@ class Fsdantic:
         enable_wal: bool = True,
         enable_mvcc: bool = False,
         readonly: bool = False,
+        busy_timeout_ms: int = 5000,
     ) -> Workspace:
         """Unified connection seam for both open paths.
 
         Both ``open`` (non-MVCC) and the MVCC path create and own the turso
-        connection here, so WAL setup, read-only guarding, and (later) busy
-        timeout configuration happen in exactly one place.
+        connection here, so WAL setup, busy-timeout configuration, and
+        read-only guarding happen in exactly one place.
 
         Order matters for read-only workspaces:
 
@@ -135,9 +164,11 @@ class Fsdantic:
         2. ``turso_connect``;
         3. ``_enable_wal`` — must happen **before** locking (it writes the
            DB header);
-        4. wrap the connection in ``_ReadonlyGuard``;
-        5. ``AgentFS.open_with(guard)`` — schema init must run **unlocked**;
-        6. ``guard.lock()`` + ``PRAGMA query_only = 1`` (numeric! ``= ON``
+        4. ``PRAGMA busy_timeout`` — connection-level setting, applied when
+           ``busy_timeout_ms >= 0`` (``0`` disables the wait explicitly);
+        5. wrap the connection in ``_ReadonlyGuard``;
+        6. ``AgentFS.open_with(guard)`` — schema init must run **unlocked**;
+        7. ``guard.lock()`` + ``PRAGMA query_only = 1`` (numeric! ``= ON``
            fails to parse on pyturso) as a hard backstop for anything that
            bypasses the proxy (e.g. cursors from ``connection.cursor()``).
         """
@@ -162,6 +193,9 @@ class Fsdantic:
             except Exception as exc:
                 logger.debug("Could not enable WAL mode: %s", exc)
 
+        if busy_timeout_ms is not None and busy_timeout_ms >= 0:
+            await conn.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
+
         guard = _ReadonlyGuard(conn)
 
         # Schema init (CREATE TABLE IF NOT EXISTS, WAL journal config rows)
@@ -176,7 +210,7 @@ class Fsdantic:
             # ``PRAGMA query_only = ON`` fails to parse on pyturso 0.4.4.
             await conn.execute("PRAGMA query_only = 1")
 
-        return Workspace(agentfs, readonly=readonly)
+        return Workspace(agentfs, readonly=readonly, busy_timeout_ms=busy_timeout_ms)
 
     @classmethod
     async def open_with_options(cls, options: AgentFSOptions) -> Workspace:
