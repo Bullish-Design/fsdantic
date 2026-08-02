@@ -126,6 +126,7 @@ class FileManager:
         agent_fs: AgentFS,
         base_fs: AgentFS | None = None,
         readonly: bool = False,
+        max_content_bytes: int | None = None,
     ):
         """Initialize the file manager.
 
@@ -135,10 +136,15 @@ class FileManager:
             readonly: When True, write methods (``write``/``write_many``/
                 ``remove``) raise ``WorkspaceError`` with
                 ``code="WORKSPACE_READONLY"`` before touching storage.
+            max_content_bytes: Optional cap on write payload sizes.  ``write``
+                payloads larger than this raise ``WorkspaceError`` with
+                ``code="CONTENT_TOO_LARGE"`` before touching storage.
+                ``None`` (default) is unbounded.
         """
         self.agent_fs = agent_fs
         self.base_fs = base_fs
         self.readonly = readonly
+        self.max_content_bytes = max_content_bytes
 
     def _ensure_writable(self, context: str) -> None:
         """Raise ``WorkspaceError(WORKSPACE_READONLY)`` on read-only managers.
@@ -150,6 +156,16 @@ class FileManager:
             raise WorkspaceError(
                 f"{context}: workspace is read-only",
                 code="WORKSPACE_READONLY",
+            )
+
+    def _ensure_within_size_cap(self, context: str, payload_size: int) -> None:
+        """Raise ``WorkspaceError(CONTENT_TOO_LARGE)`` when ``payload_size``
+        exceeds the configured ``max_content_bytes`` cap."""
+        if self.max_content_bytes is not None and payload_size > self.max_content_bytes:
+            raise WorkspaceError(
+                f"{context}: content of {payload_size} bytes exceeds the configured "
+                f"max_content_bytes={self.max_content_bytes}",
+                code="CONTENT_TOO_LARGE",
             )
 
     @overload
@@ -283,12 +299,15 @@ class FileManager:
 
         Raises:
             WorkspaceError: with ``code="WORKSPACE_READONLY"`` when this
-                manager belongs to a read-only workspace.
+                manager belongs to a read-only workspace, or
+                ``code="CONTENT_TOO_LARGE"`` when the payload exceeds the
+                configured ``max_content_bytes`` cap.
         """
         path = normalize_path(path)
         context = f"FileManager.write(path={path!r})"
         self._ensure_writable(context)
         payload = self._prepare_write_payload(content, mode=mode, encoding=encoding)
+        self._ensure_within_size_cap(context, len(payload))
 
         try:
             await self.agent_fs.fs.write_file(path, payload)

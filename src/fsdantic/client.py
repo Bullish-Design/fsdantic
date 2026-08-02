@@ -91,9 +91,10 @@ class Fsdantic:
         enable_mvcc: bool = False,
         readonly: bool = False,
         busy_timeout_ms: int = 5000,
+        max_content_bytes: int | None = None,
     ) -> Workspace:
-        """Open a workspace by ID or path with optional concurrency and
-        read-only configuration.
+        """Open a workspace by ID or path with optional concurrency,
+        read-only, and content-size configuration.
 
         Exactly one of ``id`` or ``path`` must be provided.
 
@@ -118,6 +119,11 @@ class Fsdantic:
                 locked".  Default 5000.  Pass ``0`` to disable the wait
                 (fail immediately, the raw turso default); negative values
                 leave the timeout untouched.
+            max_content_bytes: Optional cap on write payload sizes
+                (``files.write``/``write_many`` payloads and ``kv.set``/
+                ``set_many`` JSON payloads).  Payloads larger than the cap
+                raise ``WorkspaceError`` (``CONTENT_TOO_LARGE``) before any
+                storage is touched.  ``None`` (default) is unbounded.
 
         Concurrency contract (see the module docstring):
 
@@ -140,6 +146,7 @@ class Fsdantic:
             enable_mvcc=enable_mvcc,
             readonly=readonly,
             busy_timeout_ms=busy_timeout_ms,
+            max_content_bytes=max_content_bytes,
         )
 
     @classmethod
@@ -151,6 +158,7 @@ class Fsdantic:
         enable_mvcc: bool = False,
         readonly: bool = False,
         busy_timeout_ms: int = 5000,
+        max_content_bytes: int | None = None,
     ) -> Workspace:
         """Unified connection seam for both open paths.
 
@@ -210,7 +218,12 @@ class Fsdantic:
             # ``PRAGMA query_only = ON`` fails to parse on pyturso 0.4.4.
             await conn.execute("PRAGMA query_only = 1")
 
-        return Workspace(agentfs, readonly=readonly, busy_timeout_ms=busy_timeout_ms)
+        return Workspace(
+            agentfs,
+            readonly=readonly,
+            busy_timeout_ms=busy_timeout_ms,
+            max_content_bytes=max_content_bytes,
+        )
 
     @classmethod
     async def open_with_options(cls, options: AgentFSOptions) -> Workspace:

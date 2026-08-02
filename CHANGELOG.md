@@ -6,6 +6,13 @@ All notable changes to fsdantic are documented in this file.
 
 ### Added
 
+- **`max_content_bytes` parameter** — `Fsdantic.open(...,
+  max_content_bytes=N)` caps write payloads at the API boundary:
+  `files.write`/`write_many` measure the encoded payload and `kv.set`/
+  `set_many` measure the serialized JSON text.  Oversized payloads raise
+  `WorkspaceError` (`CONTENT_TOO_LARGE`) before storage is touched;
+  batch APIs report oversized items per-item.  `None` (default) is
+  unbounded.  Exposed as `Workspace.max_content_bytes`. (F4)
 - **`KVManager.increment(key, amount=1)`** — atomic counter increment that
   creates the key at 0 when absent, rejects non-numeric stored values with
   `SerializationError`, and returns the new value.  Same-process increments

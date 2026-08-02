@@ -260,6 +260,8 @@ class WorkspaceError(FsdanticError):
       (either through the manager APIs or the raw connection guard).
     - ``WORKSPACE_NOT_FOUND``: a read-only open targeted a database file that
       does not exist.
+    - ``CONTENT_TOO_LARGE``: a write payload exceeded the workspace's
+      configured ``max_content_bytes`` cap.
 
     ``WORKSPACE_ERROR`` is the default code when none is supplied.
     """

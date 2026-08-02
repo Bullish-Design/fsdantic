@@ -26,10 +26,12 @@ class Workspace:
         raw: AgentFS,
         readonly: bool = False,
         busy_timeout_ms: int | None = None,
+        max_content_bytes: int | None = None,
     ):
         self._raw = raw
         self._readonly = readonly
         self._busy_timeout_ms = busy_timeout_ms
+        self._max_content_bytes = max_content_bytes
         self._files: FileManager | None = None
         self._kv: KVManager | None = None
         self._overlay: OverlayManager | None = None
@@ -65,6 +67,16 @@ class Workspace:
         return self._busy_timeout_ms
 
     @property
+    def max_content_bytes(self) -> int | None:
+        """Write payload cap (bytes) configured at open time.
+
+        Set by :meth:`Fsdantic.open` (default ``None`` = unbounded).
+        Payloads larger than the cap raise ``WorkspaceError`` with
+        ``code="CONTENT_TOO_LARGE"``.
+        """
+        return self._max_content_bytes
+
+    @property
     def connection(self) -> TursoConnection:
         """Expose the underlying database connection.
 
@@ -85,14 +97,22 @@ class Workspace:
     def files(self) -> FileManager:
         """Lazy file manager."""
         if self._files is None:
-            self._files = FileManager(self._raw, readonly=self._readonly)
+            self._files = FileManager(
+                self._raw,
+                readonly=self._readonly,
+                max_content_bytes=self._max_content_bytes,
+            )
         return self._files
 
     @property
     def kv(self) -> KVManager:
         """Lazy key-value manager for simple and typed KV workflows."""
         if self._kv is None:
-            self._kv = KVManager(self._raw, readonly=self._readonly)
+            self._kv = KVManager(
+                self._raw,
+                readonly=self._readonly,
+                max_content_bytes=self._max_content_bytes,
+            )
         return self._kv
 
     @property

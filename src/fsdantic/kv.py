@@ -194,19 +194,31 @@ class KVManager:
     typed repositories to a specific prefix.
     """
 
-    def __init__(self, agent_fs: AgentFS, prefix: str = "", readonly: bool = False):
+    def __init__(
+        self,
+        agent_fs: AgentFS,
+        prefix: str = "",
+        readonly: bool = False,
+        max_content_bytes: int | None = None,
+    ):
         """Initialize a KV manager.
 
         Args:
             agent_fs: Backing AgentFS instance.
             prefix: Namespace prefix automatically applied to keys.
             readonly: When True, write methods (``set``/``set_many``/
-                ``delete``/``delete_many``) raise ``WorkspaceError`` with
-                ``code="WORKSPACE_READONLY"`` before touching storage.
+                ``delete``/``delete_many``/``increment``) raise
+                ``WorkspaceError`` with ``code="WORKSPACE_READONLY"`` before
+                touching storage.
+            max_content_bytes: Optional cap on serialized JSON payload sizes
+                for ``set``/``set_many``.  Larger payloads raise
+                ``WorkspaceError`` with ``code="CONTENT_TOO_LARGE"`` before
+                touching storage.  ``None`` (default) is unbounded.
         """
         self._agent_fs = agent_fs
         self._prefix = self._compose_prefix("", prefix)
         self._readonly = readonly
+        self._max_content_bytes = max_content_bytes
         self._locks: dict[str, asyncio.Lock] = {}
         self._locks_guard = asyncio.Lock()
 
@@ -214,6 +226,11 @@ class KVManager:
     def readonly(self) -> bool:
         """True when this manager enforces read-only mode."""
         return self._readonly
+
+    @property
+    def max_content_bytes(self) -> int | None:
+        """The serialized-payload cap (bytes), or None when unbounded."""
+        return self._max_content_bytes
 
     def _ensure_writable(self, context: str) -> None:
         """Raise ``WorkspaceError(WORKSPACE_READONLY)`` on read-only managers.
@@ -351,12 +368,23 @@ class KVManager:
 
         Raises:
             WorkspaceError: with ``code="WORKSPACE_READONLY"`` when this
-                manager belongs to a read-only workspace.
+                manager belongs to a read-only workspace, or
+                ``code="CONTENT_TOO_LARGE"`` when the serialized payload
+                exceeds the configured ``max_content_bytes`` cap.
         """
         self._ensure_writable(f"KVManager.set(key={key!r})")
         qualified_key = self._qualify_key(key)
         try:
-            await self._agent_fs.kv.set(qualified_key, _kv_normalize(value))
+            normalized = _kv_normalize(value)
+            if self._max_content_bytes is not None:
+                stored_size = len(json.dumps(normalized))
+                if stored_size > self._max_content_bytes:
+                    raise WorkspaceError(
+                        f"KVManager.set(key={key!r}): content of {stored_size} bytes exceeds "
+                        f"the configured max_content_bytes={self._max_content_bytes}",
+                        code="CONTENT_TOO_LARGE",
+                    )
+            await self._agent_fs.kv.set(qualified_key, normalized)
         except (TypeError, ValueError) as exc:
             raise SerializationError(
                 f"KV serialization failed during set for key='{qualified_key}' "
@@ -625,10 +653,11 @@ class KVManager:
 
         The returned manager supports both simple KV methods and typed
         repositories while applying the combined prefix.  The child manager
-        inherits this manager's read-only state.
+        inherits this manager's read-only state and content cap.
         """
         return KVManager(
             self._agent_fs,
             prefix=self._compose_prefix(self._prefix, prefix),
             readonly=self._readonly,
+            max_content_bytes=self._max_content_bytes,
         )
