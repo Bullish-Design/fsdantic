@@ -4,10 +4,12 @@ import asyncio
 
 import pytest
 from agentfs_sdk import ErrnoException
+
 from fsdantic import (
     DirectoryNotEmptyError,
     FileManager,
     FileNotFoundError,
+    FileOperations,
     FileStats,
     FileSystemError,
     IsADirectoryError,
@@ -857,3 +859,61 @@ class TestFileManagerErrorTranslation:
             await manager.stat("some/path.txt")
 
         assert type(exc_info.value) is FileSystemError
+
+
+@pytest.mark.asyncio
+class TestFileOperationsAlias:
+    """Direct coverage of the deprecated FileOperations alias methods."""
+
+    async def test_read_file_binary_with_encoding_none(self, agent_fs):
+        """read_file(encoding=None) reads bytes without decoding."""
+        ops = FileOperations(agent_fs)
+        payload = b"\x00\x01\x02\xff"
+        await ops.write_file("/blob.bin", payload)
+
+        data = await ops.read_file("/blob.bin", encoding=None)
+
+        assert data == payload
+        assert isinstance(data, bytes)
+
+    async def test_read_file_text_default_encoding(self, agent_fs):
+        ops = FileOperations(agent_fs)
+        await ops.write_file("/hello.txt", "hello")
+
+        assert await ops.read_file("/hello.txt") == "hello"
+        assert await ops.read_file("/hello.txt", encoding="utf-8") == "hello"
+
+    async def test_read_file_missing_raises_file_not_found(self, agent_fs):
+        ops = FileOperations(agent_fs)
+
+        with pytest.raises(FileNotFoundError):
+            await ops.read_file("/missing.txt")
+
+    async def test_write_file_text_and_binary(self, agent_fs):
+        """write_file accepts text and binary content through the alias."""
+        ops = FileOperations(agent_fs)
+        await ops.write_file("/text.txt", "text content")
+        await ops.write_file("/binary.dat", b"\x00\x01")
+
+        assert await agent_fs.fs.read_file("/text.txt") == "text content"
+        assert await agent_fs.fs.read_file("/binary.dat", encoding=None) == b"\x00\x01"
+
+    async def test_file_exists(self, agent_fs):
+        ops = FileOperations(agent_fs)
+
+        assert await ops.file_exists("/nope.txt") is False
+        await ops.write_file("/yes.txt", "x")
+        assert await ops.file_exists("/yes.txt") is True
+
+    async def test_search_files_recursive_and_non_recursive(self, agent_fs):
+        ops = FileOperations(agent_fs)
+        await ops.write_file("/file1.py", "print('1')")
+        await ops.write_file("/data/file2.py", "print('2')")
+
+        recursive = await ops.search_files("*.py")
+        assert len(recursive) == 2
+        assert "/file1.py" in recursive
+        assert "/data/file2.py" in recursive
+
+        non_recursive = await ops.search_files("*.py", recursive=False)
+        assert non_recursive == ["/file1.py"]
