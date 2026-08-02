@@ -37,6 +37,12 @@ build-backend = "hatchling.build"
 # Tell hatch which package to ship (your code lives in src/template_py)
 packages = ["src/fsdantic"]
 
+[tool.hatch.metadata]
+# fsdantic depends on the agentfs-sdk fork via a direct git reference
+# (agentfs-sdk @ git+https://...); hatchling rejects direct references in
+# project.dependencies unless this is enabled.
+allow-direct-references = true
+
 [tool.hatch.build.targets.sdist]
 include = [
   "src",
