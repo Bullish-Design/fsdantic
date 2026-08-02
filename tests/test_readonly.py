@@ -10,8 +10,10 @@ The read-only mode is enforced at two layers:
 """
 
 import pytest
+from turso import ProgrammingError
 
 from fsdantic import Fsdantic, WorkspaceError
+from fsdantic._internal.readonly import _first_keyword
 
 pytestmark = pytest.mark.asyncio
 
@@ -238,3 +240,141 @@ class TestReadonlyOpenBehavior:
         with pytest.raises(WorkspaceError) as exc_info:
             await Fsdantic.open(path=temp_db_path, readonly=True)
         assert exc_info.value.code == "WORKSPACE_NOT_FOUND"
+
+
+class TestReadonlyCommentHandling:
+    """SQL comment-skipping in the connection guard's keyword classifier.
+
+    A statement may be prefixed by ``--`` line comments or ``/* */`` block
+    comments; the guard must still classify the first real SQL keyword so a
+    commented-prefixed write cannot bypass read-only enforcement.
+    """
+
+    async def _open_readonly(self, temp_db_path):
+        writer = await Fsdantic.open(path=temp_db_path)
+        await writer.files.write("/comment.txt", "payload")
+        await writer.close()
+        ro = await Fsdantic.open(path=temp_db_path, readonly=True)
+        return ro
+
+    async def test_line_comment_before_select_passes_through(self, temp_db_path):
+        ro = await self._open_readonly(temp_db_path)
+        try:
+            cursor = await ro.connection.execute("-- just a comment\nSELECT 1")
+            assert (await cursor.fetchone())[0] == 1
+        finally:
+            await ro.close()
+
+    async def test_block_comment_before_select_passes_through(self, temp_db_path):
+        ro = await self._open_readonly(temp_db_path)
+        try:
+            cursor = await ro.connection.execute("/* block comment */ SELECT 2")
+            assert (await cursor.fetchone())[0] == 2
+        finally:
+            await ro.close()
+
+    async def test_line_comment_before_write_rejected(self, temp_db_path):
+        ro = await self._open_readonly(temp_db_path)
+        try:
+            with pytest.raises(WorkspaceError) as exc_info:
+                await ro.connection.execute(
+                    "-- stealth insert\nINSERT INTO kv_store (key, value) VALUES ('a', 'b')"
+                )
+            assert exc_info.value.code == "WORKSPACE_READONLY"
+        finally:
+            await ro.close()
+
+    async def test_block_comment_before_write_rejected(self, temp_db_path):
+        ro = await self._open_readonly(temp_db_path)
+        try:
+            with pytest.raises(WorkspaceError) as exc_info:
+                await ro.connection.execute(
+                    "/* stealth delete */ DELETE FROM kv_store WHERE key = 'a'"
+                )
+            assert exc_info.value.code == "WORKSPACE_READONLY"
+        finally:
+            await ro.close()
+
+    async def test_comment_only_statement_not_rejected_as_write(self, temp_db_path):
+        """A comment-only statement has no first keyword, so the guard must
+        not reject it; the driver then reports no statements to execute."""
+        ro = await self._open_readonly(temp_db_path)
+        try:
+            with pytest.raises(ProgrammingError, match="no SQL statements to execute"):
+                await ro.connection.execute("-- nothing here")
+        finally:
+            await ro.close()
+
+
+class TestFirstKeywordCommentSkipping:
+    """Unit tests for the keyword classifier's comment-skipping branches."""
+
+    def test_line_comment_skipped(self):
+        assert _first_keyword("-- comment\nSELECT 1") == "SELECT"
+        assert _first_keyword("   -- comment\r\nINSERT INTO t") == "INSERT"
+
+    def test_block_comment_skipped(self):
+        assert _first_keyword("/* comment */ SELECT 1") == "SELECT"
+        assert _first_keyword("/* multi\nline */ UPDATE t") == "UPDATE"
+
+    def test_whitespace_and_comment_only_yields_empty(self):
+        assert _first_keyword("") == ""
+        assert _first_keyword("   ") == ""
+        assert _first_keyword("-- only a comment") == ""
+        assert _first_keyword("/* only a comment */") == ""
+
+    def test_plain_write_keywords_still_classified(self):
+        assert _first_keyword("INSERT INTO t") == "INSERT"
+        assert _first_keyword("REPLACE INTO t") == "REPLACE"
+
+
+class TestReadonlyExecutemany:
+    """``executemany`` write-rejection on locked read-only connections."""
+
+    async def _open_readonly(self, temp_db_path):
+        writer = await Fsdantic.open(path=temp_db_path)
+        await writer.files.write("/executemany.txt", "payload")
+        await writer.close()
+        return await Fsdantic.open(path=temp_db_path, readonly=True)
+
+    async def test_executemany_insert_rejected(self, temp_db_path):
+        ro = await self._open_readonly(temp_db_path)
+        try:
+            with pytest.raises(WorkspaceError) as exc_info:
+                await ro.connection.executemany(
+                    "INSERT INTO kv_store (key, value) VALUES (?, ?)",
+                    [("k1", "v1"), ("k2", "v2")],
+                )
+            assert exc_info.value.code == "WORKSPACE_READONLY"
+        finally:
+            await ro.close()
+
+    async def test_executemany_update_rejected(self, temp_db_path):
+        """The atime swallow is scoped to ``execute``: an UPDATE routed
+        through ``executemany`` is still rejected."""
+        ro = await self._open_readonly(temp_db_path)
+        try:
+            with pytest.raises(WorkspaceError) as exc_info:
+                await ro.connection.executemany("UPDATE fs_inode SET atime = 1", [])
+            assert exc_info.value.code == "WORKSPACE_READONLY"
+        finally:
+            await ro.close()
+
+    async def test_executemany_delete_rejected(self, temp_db_path):
+        ro = await self._open_readonly(temp_db_path)
+        try:
+            with pytest.raises(WorkspaceError) as exc_info:
+                await ro.connection.executemany("DELETE FROM kv_store WHERE key = ?", [("k",)])
+            assert exc_info.value.code == "WORKSPACE_READONLY"
+        finally:
+            await ro.close()
+
+    async def test_executemany_non_dml_passes_through_to_driver(self, temp_db_path):
+        """Non-write executemany is not intercepted by the guard; the driver
+        then rejects it because executemany requires a DML statement."""
+        ro = await self._open_readonly(temp_db_path)
+        try:
+            with pytest.raises(ProgrammingError, match="single DML"):
+                await ro.connection.executemany("SELECT 1", [])
+        finally:
+            await ro.close()
