@@ -18,8 +18,9 @@ if TYPE_CHECKING:
 class Workspace:
     """Unified runtime façade around an AgentFS instance."""
 
-    def __init__(self, raw: AgentFS):
+    def __init__(self, raw: AgentFS, readonly: bool = False):
         self._raw = raw
+        self._readonly = readonly
         self._files: FileManager | None = None
         self._kv: KVManager | None = None
         self._overlay: OverlayManager | None = None
@@ -32,6 +33,17 @@ class Workspace:
         return self._raw
 
     @property
+    def readonly(self) -> bool:
+        """True when this workspace is open in read-only mode.
+
+        Read-only workspaces reject write operations with
+        ``WorkspaceError(code="WORKSPACE_READONLY")`` at the manager API
+        boundary and at the raw connection level (via the connection
+        guard).
+        """
+        return self._readonly
+
+    @property
     def connection(self) -> TursoConnection:
         """Expose the underlying database connection.
 
@@ -39,6 +51,12 @@ class Workspace:
         this workspace.  Useful for running PRAGMAs, inspecting journal
         mode, or performing advanced operations (e.g. ``BEGIN CONCURRENT``
         under MVCC).
+
+        On read-only workspaces this returns the fsdantic ``_ReadonlyGuard``
+        proxy (which satisfies the turso ``Connection`` protocol): read-ish
+        statements and PRAGMAs (e.g. ``PRAGMA busy_timeout``) pass through,
+        while write statements raise ``WorkspaceError``
+        (``WORKSPACE_READONLY``).
         """
         return self._raw.get_database()
 
@@ -46,28 +64,28 @@ class Workspace:
     def files(self) -> FileManager:
         """Lazy file manager."""
         if self._files is None:
-            self._files = FileManager(self._raw)
+            self._files = FileManager(self._raw, readonly=self._readonly)
         return self._files
 
     @property
     def kv(self) -> KVManager:
         """Lazy key-value manager for simple and typed KV workflows."""
         if self._kv is None:
-            self._kv = KVManager(self._raw)
+            self._kv = KVManager(self._raw, readonly=self._readonly)
         return self._kv
 
     @property
     def overlay(self) -> OverlayManager:
         """Lazy overlay manager."""
         if self._overlay is None:
-            self._overlay = OverlayManager(self._raw)
+            self._overlay = OverlayManager(self._raw, readonly=self._readonly)
         return self._overlay
 
     @property
     def materialize(self) -> MaterializationManager:
         """Lazy materialization manager."""
         if self._materialize is None:
-            self._materialize = MaterializationManager(self._raw)
+            self._materialize = MaterializationManager(self._raw, readonly=self._readonly)
         return self._materialize
 
     async def close(self) -> None:

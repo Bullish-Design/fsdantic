@@ -10,7 +10,7 @@ from agentfs_sdk import AgentFS, ErrnoException
 
 from ._internal.errors import translate_agentfs_error
 from ._internal.paths import join_normalized_path, normalize_path
-from .exceptions import OverlayError
+from .exceptions import OverlayError, WorkspaceError
 
 if TYPE_CHECKING:
     from .workspace import Workspace
@@ -418,15 +418,42 @@ class OverlayManager:
         self,
         agent_fs: AgentFS,
         operations: OverlayOperations | None = None,
+        readonly: bool = False,
     ):
+        """Initialize the overlay manager.
+
+        Args:
+            agent_fs: Backing AgentFS instance (merge/reset target).
+            operations: Optional :class:`OverlayOperations` backend.
+            readonly: When True, write methods (``merge``/``reset``) raise
+                ``WorkspaceError`` with ``code="WORKSPACE_READONLY"``.
+        """
         self._agent_fs = agent_fs
         self._operations = operations or OverlayOperations()
+        self._readonly = readonly
+
+    @property
+    def readonly(self) -> bool:
+        """True when this manager enforces read-only mode."""
+        return self._readonly
 
     @staticmethod
     def _resolve_agentfs(source: AgentFS | Workspace) -> AgentFS:
         """Resolve either Workspace or raw AgentFS into AgentFS."""
         raw = getattr(source, "raw", source)
         return raw
+
+    def _ensure_writable(self, context: str) -> None:
+        """Raise ``WorkspaceError(WORKSPACE_READONLY)`` on read-only managers.
+
+        The connection guard is the primary enforcement; this check provides
+        early, clear errors at the API boundary before any SDK work begins.
+        """
+        if self._readonly:
+            raise WorkspaceError(
+                f"{context}: workspace is read-only",
+                code="WORKSPACE_READONLY",
+            )
 
     async def merge(
         self,
@@ -440,7 +467,12 @@ class OverlayManager:
         ``conflict_resolver`` is forwarded to the underlying
         :class:`OverlayOperations` call (required for
         ``MergeStrategy.CALLBACK``).
+
+        Raises:
+            WorkspaceError: with ``code="WORKSPACE_READONLY"`` when this
+                manager belongs to a read-only workspace.
         """
+        self._ensure_writable("OverlayManager.merge")
         source_fs = self._resolve_agentfs(source)
         return await self._operations.merge(
             source=source_fs,
@@ -455,5 +487,11 @@ class OverlayManager:
         return await self._operations.list_changes(self._agent_fs, path=path)
 
     async def reset(self, paths: list[str] | None = None) -> int:
-        """Reset selected paths (or all paths) in this workspace overlay."""
+        """Reset selected paths (or all paths) in this workspace overlay.
+
+        Raises:
+            WorkspaceError: with ``code="WORKSPACE_READONLY"`` when this
+                manager belongs to a read-only workspace.
+        """
+        self._ensure_writable("OverlayManager.reset")
         return await self._operations.reset_overlay(self._agent_fs, paths=paths)

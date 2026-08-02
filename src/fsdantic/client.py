@@ -11,6 +11,8 @@ from agentfs_sdk import AgentFSOptions as SDKAgentFSOptions
 from turso.aio import Connection as TursoConnection
 from turso.aio import connect as turso_connect
 
+from ._internal.readonly import _ReadonlyGuard
+from .exceptions import WorkspaceError
 from .models import AgentFSOptions
 from .workspace import Workspace
 
@@ -67,8 +69,10 @@ class Fsdantic:
         path: str | None = None,
         enable_wal: bool = True,
         enable_mvcc: bool = False,
+        readonly: bool = False,
     ) -> Workspace:
-        """Open a workspace by ID or path with optional concurrency configuration.
+        """Open a workspace by ID or path with optional concurrency and
+        read-only configuration.
 
         Exactly one of ``id`` or ``path`` must be provided.
 
@@ -80,6 +84,14 @@ class Fsdantic:
             enable_mvcc: If True, enable MVCC with ``BEGIN CONCURRENT``
                 support for optimistic concurrent writes from multiple
                 connections.  Forces ``enable_wal=True``.
+            readonly: If True, open the workspace read-only.  Write
+                operations — through the manager APIs (``files.write``,
+                ``kv.set``, ``overlay.merge``, ...) or raw statements on
+                :attr:`Workspace.connection` — raise
+                :class:`WorkspaceError` (``WORKSPACE_READONLY``).  The
+                database file must already exist (``WORKSPACE_NOT_FOUND``
+                otherwise).  Reads never write: the SDK's access-time
+                maintenance write is neutralized.
 
         Concurrency notes:
             * **WAL mode** (default): unlimited concurrent readers alongside
@@ -95,55 +107,85 @@ class Fsdantic:
             enable_wal = True
 
         options = AgentFSOptions(id=id, path=path)
-
-        if enable_mvcc:
-            return await cls._open_mvcc(options, enable_wal=enable_wal)
-
-        workspace = await cls.open_with_options(options)
-
-        if enable_wal:
-            try:
-                await _enable_wal(workspace.connection)
-            except Exception as exc:
-                logger.debug("Could not enable WAL mode: %s", exc)
-
-        return workspace
+        return await cls._open_shared(
+            options,
+            enable_wal=enable_wal,
+            enable_mvcc=enable_mvcc,
+            readonly=readonly,
+        )
 
     @classmethod
-    async def _open_mvcc(
+    async def _open_shared(
         cls,
         options: AgentFSOptions,
         *,
         enable_wal: bool = True,
+        enable_mvcc: bool = False,
+        readonly: bool = False,
     ) -> Workspace:
-        """Open a workspace with MVCC support via turso.aio.connect().
+        """Unified connection seam for both open paths.
 
-        Uses ``experimental_features='mvcc'`` and ``isolation_level=None``
-        (autocommit) to enable ``BEGIN CONCURRENT`` transactions.
+        Both ``open`` (non-MVCC) and the MVCC path create and own the turso
+        connection here, so WAL setup, read-only guarding, and (later) busy
+        timeout configuration happen in exactly one place.
+
+        Order matters for read-only workspaces:
+
+        1. resolve the DB path (rejecting missing files when ``readonly``);
+        2. ``turso_connect``;
+        3. ``_enable_wal`` — must happen **before** locking (it writes the
+           DB header);
+        4. wrap the connection in ``_ReadonlyGuard``;
+        5. ``AgentFS.open_with(guard)`` — schema init must run **unlocked**;
+        6. ``guard.lock()`` + ``PRAGMA query_only = 1`` (numeric! ``= ON``
+           fails to parse on pyturso) as a hard backstop for anything that
+           bypasses the proxy (e.g. cursors from ``connection.cursor()``).
         """
-        # Same validation as the non-MVCC path; never create DBs for
-        # invalid selectors.
         _validate_selector(options)
         db_path = _resolve_db_path(options)
 
+        if readonly and not os.path.exists(db_path):
+            raise WorkspaceError(
+                f"Cannot open read-only workspace: database file does not exist: {db_path}",
+                code="WORKSPACE_NOT_FOUND",
+            )
+
         conn = await turso_connect(
             db_path,
-            experimental_features="mvcc",
-            isolation_level=None,
+            experimental_features="mvcc" if enable_mvcc else None,
+            isolation_level=None if enable_mvcc else "DEFERRED",
         )
 
         if enable_wal:
-            await _enable_wal(conn)
+            try:
+                await _enable_wal(conn)
+            except Exception as exc:
+                logger.debug("Could not enable WAL mode: %s", exc)
 
-        agentfs = await AgentFS.open_with(conn)
-        return Workspace(agentfs)
+        guard = _ReadonlyGuard(conn)
+
+        # Schema init (CREATE TABLE IF NOT EXISTS, WAL journal config rows)
+        # must run in pass-through, before enforcement starts.
+        agentfs = await AgentFS.open_with(guard)
+
+        if readonly:
+            guard.lock()
+            # Hard backstop on the underlying connection: even statements
+            # that reach it without passing the guard (e.g. via a raw
+            # ``cursor()``) are rejected by libSQL.  Note the numeric 1:
+            # ``PRAGMA query_only = ON`` fails to parse on pyturso 0.4.4.
+            await conn.execute("PRAGMA query_only = 1")
+
+        return Workspace(agentfs, readonly=readonly)
 
     @classmethod
     async def open_with_options(cls, options: AgentFSOptions) -> Workspace:
         """Open a workspace from validated options.
 
-        This is the low-level path that does not accept concurrency
-        parameters.  Use :meth:`open` for WAL/MVCC configuration.
+        This is the low-level path that does not accept concurrency or
+        read-only parameters (it connects through the AgentFS SDK directly,
+        bypassing the fsdantic connection seam).  Use :meth:`open` for
+        WAL/MVCC/readonly configuration.
         """
         _validate_selector(options)
         sdk_options = SDKAgentFSOptions(id=options.id, path=options.path)

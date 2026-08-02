@@ -20,6 +20,7 @@ from .exceptions import (
     PermissionError,
     SerializationError,
     ValidationError,
+    WorkspaceError,
 )
 from .files import FileManager, FileQuery
 from .kv import KVManager, KVTransaction
@@ -118,4 +119,5 @@ __all__ = [
     "MaterializationError",
     "ValidationError",
     "ContentSearchError",
+    "WorkspaceError",
 ]

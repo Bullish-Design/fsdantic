@@ -17,6 +17,7 @@ from agentfs_sdk import AgentFS, ErrnoException
 
 from ._internal.errors import translate_agentfs_error
 from ._internal.streaming import compare_streams
+from .exceptions import WorkspaceError
 from .files import FileManager
 from .view import ViewQuery
 
@@ -616,15 +617,48 @@ class Materializer:
 class MaterializationManager:
     """Workspace-facing materialization API backed by :class:`Materializer`."""
 
-    def __init__(self, agent_fs: AgentFS, materializer: Materializer | None = None):
+    def __init__(
+        self,
+        agent_fs: AgentFS,
+        materializer: Materializer | None = None,
+        readonly: bool = False,
+    ):
+        """Initialize the materialization manager.
+
+        Args:
+            agent_fs: Backing AgentFS instance to materialize.
+            materializer: Optional :class:`Materializer` backend.
+            readonly: When True, :meth:`to_disk` raises ``WorkspaceError``
+                with ``code="WORKSPACE_READONLY"`` (materialization writes
+                to the local filesystem).  ``diff``/``preview`` remain
+                available (read-only).
+        """
         self._agent_fs = agent_fs
         self._materializer = materializer or Materializer()
+        self._readonly = readonly
+
+    @property
+    def readonly(self) -> bool:
+        """True when this manager enforces read-only mode."""
+        return self._readonly
 
     @staticmethod
     def _resolve_agentfs(source: AgentFS | Workspace) -> AgentFS:
         """Resolve either Workspace or raw AgentFS into AgentFS."""
         raw = getattr(source, "raw", source)
         return raw
+
+    def _ensure_writable(self, context: str) -> None:
+        """Raise ``WorkspaceError(WORKSPACE_READONLY)`` on read-only managers.
+
+        The connection guard is the primary enforcement; this check provides
+        early, clear errors at the API boundary before any SDK work begins.
+        """
+        if self._readonly:
+            raise WorkspaceError(
+                f"{context}: workspace is read-only",
+                code="WORKSPACE_READONLY",
+            )
 
     async def to_disk(
         self,
@@ -635,7 +669,15 @@ class MaterializationManager:
         clean: bool = True,
         allow_root: Path | None = None,
     ) -> MaterializationResult:
-        """Materialize this workspace to disk, optionally layering a base workspace."""
+        """Materialize this workspace to disk, optionally layering a base workspace.
+
+        Raises:
+            WorkspaceError: with ``code="WORKSPACE_READONLY"`` when this
+                manager belongs to a read-only workspace (materialization
+                writes to the local filesystem and is treated as a write
+                operation).
+        """
+        self._ensure_writable("MaterializationManager.to_disk")
         base_fs = self._resolve_agentfs(base) if base is not None else None
         return await self._materializer.materialize(
             agent_fs=self._agent_fs,

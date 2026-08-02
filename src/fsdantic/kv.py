@@ -16,7 +16,7 @@ from pydantic import BaseModel
 
 from ._internal.kv_cas import get_raw as _kv_get_raw
 from ._internal.kv_cas import key_exists
-from .exceptions import FsdanticError, KeyNotFoundError, KVStoreError, SerializationError
+from .exceptions import FsdanticError, KeyNotFoundError, KVStoreError, SerializationError, WorkspaceError
 from .models import BatchItemResult, BatchResult
 
 if TYPE_CHECKING:
@@ -193,17 +193,38 @@ class KVManager:
     typed repositories to a specific prefix.
     """
 
-    def __init__(self, agent_fs: AgentFS, prefix: str = ""):
+    def __init__(self, agent_fs: AgentFS, prefix: str = "", readonly: bool = False):
         """Initialize a KV manager.
 
         Args:
             agent_fs: Backing AgentFS instance.
             prefix: Namespace prefix automatically applied to keys.
+            readonly: When True, write methods (``set``/``set_many``/
+                ``delete``/``delete_many``) raise ``WorkspaceError`` with
+                ``code="WORKSPACE_READONLY"`` before touching storage.
         """
         self._agent_fs = agent_fs
         self._prefix = self._compose_prefix("", prefix)
+        self._readonly = readonly
         self._locks: dict[str, asyncio.Lock] = {}
         self._locks_guard = asyncio.Lock()
+
+    @property
+    def readonly(self) -> bool:
+        """True when this manager enforces read-only mode."""
+        return self._readonly
+
+    def _ensure_writable(self, context: str) -> None:
+        """Raise ``WorkspaceError(WORKSPACE_READONLY)`` on read-only managers.
+
+        The connection guard is the primary enforcement; this check provides
+        early, clear errors at the API boundary before any SDK work begins.
+        """
+        if self._readonly:
+            raise WorkspaceError(
+                f"{context}: workspace is read-only",
+                code="WORKSPACE_READONLY",
+            )
 
     @staticmethod
     def _compose_prefix(base: str, child: str) -> str:
@@ -326,7 +347,12 @@ class KVManager:
         form, NOT the original Python object (datetimes come back as ISO
         strings, bytes as the marker dict).  Typed repositories round-trip
         losslessly because pydantic re-coerces during ``model_validate``.
+
+        Raises:
+            WorkspaceError: with ``code="WORKSPACE_READONLY"`` when this
+                manager belongs to a read-only workspace.
         """
+        self._ensure_writable(f"KVManager.set(key={key!r})")
         qualified_key = self._qualify_key(key)
         try:
             await self._agent_fs.kv.set(qualified_key, _kv_normalize(value))
@@ -345,7 +371,12 @@ class KVManager:
             - Returns `True` when a key existed and was deleted.
             - Returns `False` when the key did not exist.
             - Missing-key deletes are a stable no-op.
+
+        Raises:
+            WorkspaceError: with ``code="WORKSPACE_READONLY"`` when this
+                manager belongs to a read-only workspace.
         """
+        self._ensure_writable(f"KVManager.delete(key={key!r})")
         qualified_key = self._qualify_key(key)
         if not await key_exists(self._conn(), qualified_key):
             return False
@@ -412,6 +443,8 @@ class KVManager:
         if not items:
             return BatchResult()
 
+        self._ensure_writable("KVManager.set_many")
+
         semaphore = asyncio.Semaphore(concurrency_limit)
 
         async def _set_one(index: int, item: tuple[str, Any]) -> BatchItemResult:
@@ -443,6 +476,8 @@ class KVManager:
             raise ValueError("concurrency_limit must be greater than 0")
         if not keys:
             return BatchResult()
+
+        self._ensure_writable("KVManager.delete_many")
 
         semaphore = asyncio.Semaphore(concurrency_limit)
 
@@ -531,9 +566,11 @@ class KVManager:
         """Create a child KV manager scoped to a nested namespace prefix.
 
         The returned manager supports both simple KV methods and typed
-        repositories while applying the combined prefix.
+        repositories while applying the combined prefix.  The child manager
+        inherits this manager's read-only state.
         """
         return KVManager(
             self._agent_fs,
             prefix=self._compose_prefix(self._prefix, prefix),
+            readonly=self._readonly,
         )

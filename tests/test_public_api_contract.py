@@ -69,6 +69,7 @@ def test___all___exact_expected_exports() -> None:
         "MaterializationError",
         "ValidationError",
         "ContentSearchError",
+        "WorkspaceError",
     }
 
     assert set(fsdantic.__all__) == expected_exports

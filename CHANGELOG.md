@@ -2,6 +2,35 @@
 
 All notable changes to fsdantic are documented in this file.
 
+## Unreleased
+
+### Added
+
+- **`readonly` workspace mode** — `Fsdantic.open(..., readonly=True)` opens a
+  workspace for read-only inspection.  Write operations raise
+  `WorkspaceError` (`WORKSPACE_READONLY`) at the manager API boundary
+  (`files.write`/`write_many`/`remove`, `kv.set`/`set_many`/`delete`/
+  `delete_many`, `overlay.merge`/`reset`, `materialize.to_disk`) and at the
+  raw connection level via a new connection guard (`_ReadonlyGuard`).
+  Read-only reads perform **no** access-time UPDATE (the SDK's `atime`
+  maintenance write is neutralized), and reads/`stat`/`list_dir`/`tree`/
+  `exists`/`query`/`search` all work unchanged.  Opening a nonexistent
+  database read-only raises `WorkspaceError` (`WORKSPACE_NOT_FOUND`).  (F1)
+- **`WorkspaceError`** exception class with `default_code="WORKSPACE_ERROR"`
+  and the `WORKSPACE_READONLY`/`WORKSPACE_NOT_FOUND` codes. (F1)
+
+### Changed
+
+- `Fsdantic.open` now owns connection creation in both the standard and MVCC
+  paths (single unified seam): resolve path → `turso_connect` → WAL enable →
+  `_ReadonlyGuard` wrap → `AgentFS.open_with`.  `open_with_options` remains
+  SDK-direct and does not support `readonly` (documented). (F1)
+- `Workspace.connection` on readonly workspaces returns the connection guard:
+  read PRAGMAs pass through, write statements are rejected. (F1)
+- `Workspace`, `FileManager`, `KVManager`, `OverlayManager`, and
+  `MaterializationManager` expose a `readonly` flag; child KV namespaces
+  inherit it. (F1)
+
 ## [0.4.0] - 2026-08-01
 
 Behavioral refactor driven by an adversarial code review (see

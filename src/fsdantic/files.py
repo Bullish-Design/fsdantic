@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
 from ._internal.errors import translate_agentfs_error
 from ._internal.paths import join_normalized_path, normalize_glob_pattern, normalize_path
-from .exceptions import FileNotFoundError
+from .exceptions import FileNotFoundError, WorkspaceError
 from .models import BatchItemResult, BatchResult, FileEntry, FileStats
 
 logger = logging.getLogger(__name__)
@@ -121,9 +121,36 @@ class FileManager:
     _JSON_INDENT = 2
     _JSON_SEPARATORS = (",", ": ")
 
-    def __init__(self, agent_fs: AgentFS, base_fs: AgentFS | None = None):
+    def __init__(
+        self,
+        agent_fs: AgentFS,
+        base_fs: AgentFS | None = None,
+        readonly: bool = False,
+    ):
+        """Initialize the file manager.
+
+        Args:
+            agent_fs: Backing AgentFS instance (overlay).
+            base_fs: Optional stable/base AgentFS used as a read fallthrough.
+            readonly: When True, write methods (``write``/``write_many``/
+                ``remove``) raise ``WorkspaceError`` with
+                ``code="WORKSPACE_READONLY"`` before touching storage.
+        """
         self.agent_fs = agent_fs
         self.base_fs = base_fs
+        self.readonly = readonly
+
+    def _ensure_writable(self, context: str) -> None:
+        """Raise ``WorkspaceError(WORKSPACE_READONLY)`` on read-only managers.
+
+        The connection guard is the primary enforcement; this check provides
+        early, clear errors at the API boundary before any SDK work begins.
+        """
+        if self.readonly:
+            raise WorkspaceError(
+                f"{context}: workspace is read-only",
+                code="WORKSPACE_READONLY",
+            )
 
     @overload
     async def read(
@@ -253,11 +280,16 @@ class FileManager:
         ``content`` may be ``str``, ``bytes``, ``dict``, or ``list``.
         ``mode`` may be specified explicitly (``text``/``binary``/``json``) or inferred
         from content type.
+
+        Raises:
+            WorkspaceError: with ``code="WORKSPACE_READONLY"`` when this
+                manager belongs to a read-only workspace.
         """
         path = normalize_path(path)
+        context = f"FileManager.write(path={path!r})"
+        self._ensure_writable(context)
         payload = self._prepare_write_payload(content, mode=mode, encoding=encoding)
 
-        context = f"FileManager.write(path={path!r})"
         try:
             await self.agent_fs.fs.write_file(path, payload)
         except ErrnoException as e:
@@ -336,6 +368,8 @@ class FileManager:
             raise ValueError("concurrency_limit must be greater than 0")
         if not items:
             return BatchResult()
+
+        self._ensure_writable("FileManager.write_many")
 
         semaphore = asyncio.Semaphore(concurrency_limit)
 
@@ -528,9 +562,14 @@ class FileManager:
                 fails predictably (non-empty directories raise ``DirectoryNotEmptyError``;
                 empty directories are removed). If ``True``, directories are removed
                 recursively.
+
+        Raises:
+            WorkspaceError: with ``code="WORKSPACE_READONLY"`` when this
+                manager belongs to a read-only workspace.
         """
         path = normalize_path(path)
         context = f"FileManager.remove(path={path!r}, recursive={recursive!r})"
+        self._ensure_writable(context)
         try:
             stats = await self.agent_fs.fs.stat(path)
             if stats.is_directory():

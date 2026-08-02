@@ -249,3 +249,19 @@ class ContentSearchError(FsdanticError):
     """Raised when content search operations fail."""
 
     default_code = "CONTENT_SEARCH_ERROR"
+
+
+class WorkspaceError(FsdanticError):
+    """Raised for workspace-level failures (e.g. read-only violations).
+
+    Error codes (passed via ``code=``):
+
+    - ``WORKSPACE_READONLY``: a write was attempted on a read-only workspace
+      (either through the manager APIs or the raw connection guard).
+    - ``WORKSPACE_NOT_FOUND``: a read-only open targeted a database file that
+      does not exist.
+
+    ``WORKSPACE_ERROR`` is the default code when none is supplied.
+    """
+
+    default_code = "WORKSPACE_ERROR"
