@@ -20,6 +20,14 @@ class TestNormalizePath:
         normalized = normalize_path(raw_path)
         assert normalize_path(normalized) == normalized
 
+    def test_idempotent_for_trailing_backslash(self):
+        """A trailing backslash-separator must not leave a dangling space
+        segment behind: the output is a normalization fixed point."""
+        assert normalize_path("0 \\") == "/0"
+        assert normalize_path("/0 ") == "/0"
+        assert normalize_path(normalize_path("0 \\")) == "/0"
+        assert normalize_path("dir/name ") == "/dir/name"
+
 
 class TestNormalizeGlobPattern:
     def test_normalize_glob_preserves_wildcards(self):

@@ -84,6 +84,12 @@ def normalize_path(
     if not result:
         result = "/" if is_absolute else "."
 
+    # A trailing whitespace segment (e.g. ``"0 \\"`` -> ``"0 "``) must be
+    # dropped for the normalizer to be a fixed point; ``strip()`` above only
+    # trims the raw input ends, so whitespace that precedes a separator
+    # survives conversion.
+    result = result.rstrip()
+
     if preserve_trailing_slash and result not in ("", "/"):
         if normalized.endswith("/"):
             result += "/"
