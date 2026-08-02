@@ -6,6 +6,12 @@ All notable changes to fsdantic are documented in this file.
 
 ### Added
 
+- **`KVManager.increment(key, amount=1)`** — atomic counter increment that
+  creates the key at 0 when absent, rejects non-numeric stored values with
+  `SerializationError`, and returns the new value.  Same-process increments
+  are serialized per key (no lost updates); the cross-process/MVCC race on
+  the read-modify-write is documented (use the repository's per-key SQL CAS
+  for that).  Rejected on read-only workspaces. (F3)
 - **`busy_timeout_ms` parameter** — `Fsdantic.open(..., busy_timeout_ms=5000)`
   applies `PRAGMA busy_timeout = {ms}` on every connection created through
   the unified open seam (default 5000; `0` disables the wait).  Exposed as

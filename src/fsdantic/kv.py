@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 from dataclasses import dataclass
 from datetime import date, datetime
 from enum import Enum
@@ -501,6 +502,63 @@ class KVManager:
             else:
                 results.append(BatchItemResult(index=index, key_or_path=keys[index], ok=False, error=str(raw_result)))
         return BatchResult(items=results)
+
+    async def _get_typed_number(self, qualified_key: str) -> int | float:
+        """Return the numeric value stored at ``qualified_key`` (0 when missing).
+
+        Uses the raw SQL read (``_internal/kv_cas.get_raw``) so the stored
+        JSON text is decoded without the SDK's ``json.loads`` error wrapping.
+
+        Raises:
+            SerializationError: when the stored value is not a JSON number
+                (``bool`` counts as non-numeric).
+        """
+        raw = await _kv_get_raw(self._conn(), qualified_key)
+        if raw is None:
+            return 0
+        try:
+            value = json.loads(raw)
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise SerializationError(
+                f"KV increment target key='{qualified_key}' holds invalid JSON"
+            ) from exc
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise SerializationError(
+                f"KV increment target key='{qualified_key}' holds a non-numeric value "
+                f"(type={type(value).__name__})"
+            )
+        return value
+
+    async def increment(self, key: str, amount: int | float = 1) -> int | float:
+        """Atomically increment a numeric value and return the new value.
+
+        Creates the key with value 0 when absent.  Non-numeric stored values
+        raise :class:`SerializationError`.  The new value is stored as a bare
+        JSON number (consistent with ``_kv_normalize``).
+
+        Concurrency: same-process increments are serialized per key via an
+        ``asyncio.Lock`` (``_key_lock``).  Cross-process increments (e.g.
+        multiple MVCC connections) can still race on the read-modify-write
+        because the lock is per-process — use the per-key SQL CAS in
+        :class:`~fsdantic.repository.TypedKVRepository` for cross-process
+        safety.
+
+        Examples:
+            >>> await workspace.kv.set("turns", 3)
+            >>> await workspace.kv.increment("turns")  # 4
+
+        Raises:
+            WorkspaceError: with ``code="WORKSPACE_READONLY"`` when this
+                manager belongs to a read-only workspace.
+        """
+        self._ensure_writable(f"KVManager.increment(key={key!r})")
+        qualified_key = self._qualify_key(key)
+        lock = await self._key_lock(qualified_key)
+        async with lock:
+            current = await self._get_typed_number(qualified_key)
+            new_value = current + amount
+            await self._agent_fs.kv.set(qualified_key, _kv_normalize(new_value))
+            return new_value
 
     async def exists(self, key: str) -> bool:
         """Return whether a key exists using simple KV semantics."""
