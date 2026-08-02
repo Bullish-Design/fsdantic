@@ -110,4 +110,4 @@ def test_internal_helpers_not_exposed_at_top_level() -> None:
 
 def test_version_is_breaking_refactor_value() -> None:
     """Public package version should reflect the post-refactor breaking release."""
-    assert fsdantic.__version__ == "0.4.0"
+    assert fsdantic.__version__ == "0.5.0"
