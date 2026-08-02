@@ -552,6 +552,23 @@ class _StubAgent:
 
     def __init__(self, fs):
         self.fs = fs
+        self.kv = _StubKV()
+
+
+class _StubKV:
+    """Minimal duck-typed stand-in for the SDK's KvStore."""
+
+    async def list(self, prefix):
+        return []
+
+    async def set(self, key, value):
+        return None
+
+    async def delete(self, key):
+        return None
+
+    async def get(self, key, default=None):
+        return default
 
 
 def _dir_stats():

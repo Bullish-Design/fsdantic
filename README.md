@@ -313,6 +313,40 @@ Merge/overlay notes (0.4.0):
 - `reset_overlay()` raises `OverlayError` (with `context={"failed": [...]}`)
   on partial failure instead of a bare `RuntimeError`.
 
+**Deleting files in a target workspace (tombstones):**
+
+`merge()` is copy-only — it never removes files from the target. To delete
+files in the target (e.g. a stable workspace) from the source sandbox, mark
+them with a tombstone first:
+
+```python
+# Removes /legacy.txt from the sandbox overlay AND records a deletion
+# intent in the sandbox's KV store.  Missing paths are tolerated, so
+# stable-only files can be tombstoned too.
+await sandbox.overlay.tombstone("/legacy.txt")
+
+# Pushing the sandbox into stable now also deletes the file there.
+result = await stable.overlay.merge(sandbox)
+print(result.tombstones_applied)  # 1
+
+# Inspect or retract pending markers
+pending = await sandbox.overlay.list_tombstones()
+await sandbox.overlay.clear_tombstones()               # clear all
+await sandbox.overlay.clear_tombstone("/legacy.txt")   # or one
+```
+
+Tombstone semantics:
+
+- `merge()` applies the *source*'s tombstones to the target within the merge
+  scope (`path=...`); `MergeResult.tombstones_applied` reports the count
+  (including paths already absent on the target).
+- Re-creating a file in the source after tombstoning makes its marker inert:
+  the file wins and is copied by the file phase.
+- Markers persist in the source until cleared (`clear_tombstone(s)`) — a
+  re-merge applies them idempotently. They live in the KV store under the
+  reserved `fsdantic:tombstone:` prefix, so `list_changes()` and
+  materialization are unaffected.
+
 ### 4) Materialization (preview/diff/export)
 
 `clean=True` now uses a guarded staging workflow: files are materialized into a temporary sibling directory and only promoted to `target_path` after a successful run. This avoids partial output in the final target on failures.

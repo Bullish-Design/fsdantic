@@ -2,6 +2,20 @@
 
 All notable changes to fsdantic are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **Overlay tombstones**: `workspace.overlay.tombstone(path)` removes a
+  path from the workspace's own overlay and records a deletion intent in
+  its KV store (`fsdantic:tombstone:<path>`).  `merge()` now replays the
+  source's tombstones against the target filesystem within the merge scope
+  (`MergeResult.tombstones_applied` reports the count), so a sandbox can
+  delete files in a stable workspace it pushes into.  Markers are managed
+  with `list_tombstones()`/`clear_tombstone()`/`clear_tombstones()`; they
+  persist until cleared or the file is re-created in the source (which
+  makes the marker inert).
+
 ## [0.6.0] - 2026-08-02
 
 ### Changed

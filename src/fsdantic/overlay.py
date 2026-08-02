@@ -16,6 +16,25 @@ if TYPE_CHECKING:
     from .workspace import Workspace
 
 
+# KV prefix for tombstone markers.  A tombstone records a deletion intent in
+# the *source* workspace's KV store; ``merge`` replays it against the target
+# filesystem.  The prefix is reserved for fsdantic's internal use.
+_TOMBSTONE_PREFIX = "fsdantic:tombstone:"
+
+
+def _tombstone_key(path: str) -> str:
+    """Return the KV key storing the tombstone marker for ``path``."""
+    return f"{_TOMBSTONE_PREFIX}{path}"
+
+
+def _under_scope(path: str, scope: str) -> bool:
+    """True when ``path`` is at or under the merge ``scope`` root."""
+    if scope == "/":
+        return True
+    scope = scope.rstrip("/")
+    return path == scope or path.startswith(scope + "/")
+
+
 class MergeStrategy(StrEnum):
     """Strategy for merging overlays.
 
@@ -56,11 +75,14 @@ class MergeResult:
         files_merged: Number of files merged
         conflicts: List of conflicts encountered
         errors: List of errors (path, error_message)
+        tombstones_applied: Number of tombstoned paths applied to the
+            target (including paths already absent there)
     """
 
     files_merged: int
     conflicts: list[MergeConflict]
     errors: list[tuple[str, str]]
+    tombstones_applied: int = 0
 
 
 class ConflictResolver(Protocol):
@@ -121,7 +143,9 @@ class OverlayOperations:
                 configured at construction.
 
         Returns:
-            MergeResult with statistics
+            MergeResult with statistics.  ``tombstones_applied`` reports
+            how many tombstones recorded in ``source`` (see
+            :meth:`tombstone`) were applied to ``target`` within ``path``.
 
         Raises:
             OverlayError: when ``CALLBACK`` is selected and no resolver is
@@ -163,7 +187,14 @@ class OverlayOperations:
         else:
             errors.append((path, "Path is not a file or directory"))
 
-        return MergeResult(files_merged=stats["files_merged"], conflicts=conflicts, errors=errors)
+        tombstones_applied = await self._apply_tombstones(source, target, path, errors)
+
+        return MergeResult(
+            files_merged=stats["files_merged"],
+            conflicts=conflicts,
+            errors=errors,
+            tombstones_applied=tombstones_applied,
+        )
 
     async def _merge_recursive(
         self,
@@ -410,6 +441,111 @@ class OverlayOperations:
 
         return removed
 
+    # -- tombstones ---------------------------------------------------------
+
+    async def tombstone(self, overlay: AgentFS, path: str) -> None:
+        """Record a deletion intent for ``path`` and remove it from ``overlay``.
+
+        The path is removed from the overlay's own filesystem (a missing
+        path is tolerated, so files that only exist in the merge target can
+        be tombstoned) and a marker is stored in the overlay's KV store
+        under the reserved ``fsdantic:tombstone:`` prefix.  A later
+        :meth:`merge` that uses this overlay as its source applies the
+        deletion to the target filesystem.
+
+        Raises:
+            PermissionError: when ``path`` is the filesystem root (the SDK
+                rejects root removal).
+            FileSystemError: for other removal failures.
+        """
+        normalized = normalize_path(path)
+        context = f"OverlayOperations.tombstone(path={normalized!r})"
+        try:
+            stats = await overlay.fs.stat(normalized)
+            if stats.is_directory():
+                await overlay.fs.rm(normalized, recursive=True)
+            else:
+                await overlay.fs.unlink(normalized)
+        except ErrnoException as e:
+            if e.code != "ENOENT":
+                raise translate_agentfs_error(e, context) from e
+        await overlay.kv.set(_tombstone_key(normalized), {"path": normalized})
+
+    async def list_tombstones(self, overlay: AgentFS) -> list[str]:
+        """Return the tombstoned paths recorded in ``overlay``'s KV store."""
+        items = await overlay.kv.list(_TOMBSTONE_PREFIX)
+        return sorted(item["key"][len(_TOMBSTONE_PREFIX) :] for item in items)
+
+    async def clear_tombstone(self, overlay: AgentFS, path: str) -> None:
+        """Remove the tombstone marker for ``path`` (no filesystem effect)."""
+        await overlay.kv.delete(_tombstone_key(normalize_path(path)))
+
+    async def clear_tombstones(
+        self, overlay: AgentFS, paths: list[str] | None = None
+    ) -> int:
+        """Clear tombstone markers.  ``paths=None`` clears all; returns the
+        number of markers cleared."""
+        if paths is None:
+            paths = await self.list_tombstones(overlay)
+        for path in paths:
+            await overlay.kv.delete(_tombstone_key(normalize_path(path)))
+        return len(paths)
+
+    async def _apply_tombstones(
+        self,
+        source: AgentFS,
+        target: AgentFS,
+        scope: str,
+        errors: list[tuple[str, str]],
+    ) -> int:
+        """Apply ``source`` tombstones within ``scope`` to ``target``.
+
+        For each tombstoned path:
+
+        - a path that still exists in ``source`` (the file was re-created
+          after tombstoning) is left alone — the file phase already copied
+          it, and its presence overrides the marker;
+        - otherwise the path is removed from ``target``.  A target that
+          already lacks the path counts as applied; other failures are
+          recorded in ``errors`` and the marker is kept for a later retry.
+
+        Returns the number of paths applied (including paths already
+        absent on the target).
+        """
+        applied = 0
+        for path in await self.list_tombstones(source):
+            if not _under_scope(path, scope):
+                continue
+
+            # A file re-created in the source overrides its tombstone: the
+            # file phase already copied it into the target.
+            try:
+                source_stat = await source.fs.stat(path)
+            except ErrnoException as e:
+                if e.code != "ENOENT":
+                    context = f"OverlayOperations.merge(path={path!r})"
+                    errors.append((path, str(translate_agentfs_error(e, context))))
+                    continue
+            else:
+                if source_stat.is_file() or source_stat.is_directory():
+                    continue
+
+            context = f"OverlayOperations.merge(path={path!r})"
+            try:
+                target_stat = await target.fs.stat(path)
+                if target_stat.is_directory():
+                    await target.fs.rm(path, recursive=True)
+                else:
+                    await target.fs.unlink(path)
+            except ErrnoException as e:
+                if e.code == "ENOENT":
+                    applied += 1
+                    continue
+                errors.append((path, str(translate_agentfs_error(e, context))))
+                continue
+            applied += 1
+        return applied
+
 
 class OverlayManager:
     """Workspace-facing overlay API backed by :class:`OverlayOperations`."""
@@ -495,3 +631,44 @@ class OverlayManager:
         """
         self._ensure_writable("OverlayManager.reset")
         return await self._operations.reset_overlay(self._agent_fs, paths=paths)
+
+    async def tombstone(self, path: str) -> None:
+        """Record a deletion intent for ``path`` and remove it from this
+        workspace's overlay.
+
+        A later :meth:`merge` with this workspace as the source applies the
+        deletion to the merge target (reported in
+        ``MergeResult.tombstones_applied``).  See
+        :meth:`OverlayOperations.tombstone` for full semantics.
+
+        Raises:
+            WorkspaceError: with ``code="WORKSPACE_READONLY"`` when this
+                manager belongs to a read-only workspace.
+        """
+        self._ensure_writable("OverlayManager.tombstone")
+        return await self._operations.tombstone(self._agent_fs, path)
+
+    async def list_tombstones(self) -> list[str]:
+        """Return the tombstoned paths recorded in this workspace."""
+        return await self._operations.list_tombstones(self._agent_fs)
+
+    async def clear_tombstone(self, path: str) -> None:
+        """Remove the tombstone marker for ``path`` (no filesystem effect).
+
+        Raises:
+            WorkspaceError: with ``code="WORKSPACE_READONLY"`` when this
+                manager belongs to a read-only workspace.
+        """
+        self._ensure_writable("OverlayManager.clear_tombstone")
+        return await self._operations.clear_tombstone(self._agent_fs, path)
+
+    async def clear_tombstones(self, paths: list[str] | None = None) -> int:
+        """Clear tombstone markers (``paths=None`` clears all).  Returns the
+        number of markers cleared.
+
+        Raises:
+            WorkspaceError: with ``code="WORKSPACE_READONLY"`` when this
+                manager belongs to a read-only workspace.
+        """
+        self._ensure_writable("OverlayManager.clear_tombstones")
+        return await self._operations.clear_tombstones(self._agent_fs, paths=paths)
