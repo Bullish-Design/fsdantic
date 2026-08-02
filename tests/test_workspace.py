@@ -52,7 +52,6 @@ class TestOpenBehavior:
         # connection proxy (readonly guard) to AgentFS.open_with.
         assert captured["database"] == ".agentfs/agent-123.db"
         assert captured["kwargs"] == {
-            "experimental_features": None,
             "isolation_level": "DEFERRED",
         }
         from fsdantic._internal.readonly import _ReadonlyGuard
@@ -88,7 +87,6 @@ class TestOpenBehavior:
         assert isinstance(workspace, Workspace)
         assert captured["database"] == db_path
         assert captured["kwargs"] == {
-            "experimental_features": None,
             "isolation_level": "DEFERRED",
         }
 

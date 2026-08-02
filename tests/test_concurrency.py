@@ -83,17 +83,16 @@ class TestWALMode:
 
 @pytest.mark.asyncio
 class TestMVCCMode:
-    """Tests for MVCC (BEGIN CONCURRENT) support."""
+    """Tests for MVCC (journal_mode=mvcc, BEGIN CONCURRENT) support."""
 
     async def test_open_with_mvcc(self, temp_db_path_wal):
-        """enable_mvcc=True should open with MVCC support."""
+        """enable_mvcc=True should open with MVCC journaling enabled."""
         workspace = await Fsdantic.open(path=temp_db_path_wal, enable_mvcc=True)
         try:
-            # WAL should be forced on when MVCC is enabled
             conn = workspace.connection
             cursor = await conn.execute("PRAGMA journal_mode")
             result = await cursor.fetchone()
-            assert result[0] == "wal"
+            assert result[0] == "mvcc"
 
             # Basic operations should work
             await workspace.files.write("/mvcc_test.txt", "mvcc content")
@@ -103,13 +102,14 @@ class TestMVCCMode:
             await workspace.close()
 
     async def test_mvcc_forces_wal(self, temp_db_path_wal):
-        """enable_mvcc=True should force enable_wal=True even if explicitly False."""
+        """enable_mvcc=True forces enable_wal=True even if explicitly False;
+        the mvcc journal replaces WAL."""
         workspace = await Fsdantic.open(path=temp_db_path_wal, enable_wal=False, enable_mvcc=True)
         try:
             conn = workspace.connection
             cursor = await conn.execute("PRAGMA journal_mode")
             result = await cursor.fetchone()
-            assert result[0] == "wal"
+            assert result[0] == "mvcc"
         finally:
             await workspace.close()
 
@@ -135,6 +135,43 @@ class TestMVCCMode:
                 await ws2.close()
         finally:
             await ws1.close()
+
+    async def test_mvcc_begin_concurrent_accepted(self, temp_db_path_wal):
+        """Both MVCC workspace connections accept BEGIN CONCURRENT and
+        non-conflicting concurrent writes commit.
+
+        On pyturso 0.4.4 BEGIN CONCURRENT was rejected ("Concurrent
+        transaction mode is only supported when MVCC is enabled") — MVCC
+        did not exist in the driver.  On pyturso 0.7.2 with
+        journal_mode="mvcc" both connections accept it.  Note: write-write
+        conflicts are NOT reliably surfaced through the driver (each
+        connect() opens an independent MVCC store), so atomicity relies on
+        ``Workspace.serialized()`` / the repository CAS — see
+        ``docs/concurrency.md``.
+        """
+        ws1 = await Fsdantic.open(path=temp_db_path_wal, enable_mvcc=True)
+        ws2 = await Fsdantic.open(path=temp_db_path_wal, enable_mvcc=True)
+        try:
+            await ws1.files.write("/a.txt", "a")
+            await ws2.files.write("/b.txt", "b")
+            conn1 = ws1.connection
+            conn2 = ws2.connection
+
+            # Locate the two files' inodes (different rows -> no conflict).
+            cur = await conn1.execute("SELECT ino FROM fs_dentry WHERE name = 'a.txt'")
+            ino_a = (await cur.fetchone())[0]
+            cur = await conn1.execute("SELECT ino FROM fs_dentry WHERE name = 'b.txt'")
+            ino_b = (await cur.fetchone())[0]
+
+            await conn1.execute("BEGIN CONCURRENT")
+            await conn2.execute("BEGIN CONCURRENT")
+            await conn1.execute("UPDATE fs_inode SET mtime = mtime + 1 WHERE ino = ?", (ino_a,))
+            await conn2.execute("UPDATE fs_inode SET mtime = mtime + 1 WHERE ino = ?", (ino_b,))
+            await conn1.commit()
+            await conn2.commit()
+        finally:
+            await ws1.close()
+            await ws2.close()
 
 
 @pytest.mark.asyncio

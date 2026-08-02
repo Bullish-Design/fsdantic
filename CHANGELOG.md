@@ -22,6 +22,23 @@ All notable changes to fsdantic are documented in this file.
   `docs/concurrency.md`; `TestTwoWriters` gains
   `test_two_writers_waits_then_succeeds`, which orchestrates the "waits
   then succeeds" scenario that was impossible on pyturso 0.4.4.
+- **`enable_mvcc=True` now actually enables libSQL MVCC journaling**
+  (`PRAGMA journal_mode = "mvcc"` on pyturso >= 0.7.2) instead of silently
+  opening in WAL mode (`experimental_features="mvcc"` was a no-op on every
+  released pyturso; 0.4.4's libSQL build had no MVCC support at all and
+  rejected `BEGIN CONCURRENT`).  The journal-mode switch happens AFTER SDK
+  schema init, because the Limbo engine keeps mvcc-mode DDL in the
+  in-memory MVCC store and it is not visible to other connections
+  otherwise.  **Conflict-detection caveat (verified by probe):** pyturso's
+  Python API opens an independent MVCC store per connection, so write-write
+  conflicts are NOT reliably surfaced through the driver — concurrent
+  same-row writes are effectively last-write-wins.  The previously
+  documented "conflicting writes raise `DatabaseError` at execute time"
+  contract is removed from the `client` module docstring and
+  `docs/concurrency.md`; correctness relies on `Workspace.serialized()`
+  and the repository's per-key SQL CAS.  `TestMVCCMode` now pins the real
+  journal mode (`mvcc`) and that `BEGIN CONCURRENT` is accepted on both
+  connections.
 - Verified unchanged on 0.7.2: `connect()` signature (no `readonly`
   param), `PRAGMA query_only = ON` parse failure (`= 1` still required),
   CAS `rowcount` accuracy, the `fetchone()` read-transaction caveat, and

@@ -46,14 +46,24 @@ supported.  `busy_timeout_ms=0` disables the wait (fail immediately).
 
 ## MVCC (`enable_mvcc=True`)
 
-MVCC enables `BEGIN CONCURRENT` support (`experimental_features="mvcc"`,
-`isolation_level=None`). Multiple connections can write concurrently:
+`enable_mvcc=True` enables libSQL's MVCC journaling via `PRAGMA
+journal_mode = "mvcc"` (pyturso >= 0.7.2, Limbo engine). Multiple
+connections can write concurrently **without lock contention** and
+`BEGIN CONCURRENT` transactions are accepted on every connection.
 
-- Non-conflicting writes succeed.
-- Conflicting writes raise `DatabaseError` at **execute** time.
+Conflict-detection caveat (verified by probe on pyturso 0.7.2): pyturso's
+Python API opens an **independent MVCC store per connection** (each
+`connect()` creates a fresh database instance; the core's
+`WriteWriteConflict` detection only fires for connections sharing one
+instance, which the Python API cannot express).  Consequence: **write-write
+conflicts are not reliably surfaced through the driver** — concurrent
+same-row writes are effectively last-write-wins and there is no
+`DatabaseError` to catch and retry on.  (On pyturso 0.4.4 the
+`experimental_features="mvcc"` connect option was a silent no-op and MVCC
+did not exist in the driver at all — `BEGIN CONCURRENT` was rejected.)
 
-Callers must catch `DatabaseError` and retry the write. Fsdantic provides
+For atomic read-modify-write sequences, fsdantic provides
 [`Workspace.serialized`](../src/fsdantic/workspace.py) as a same-process
-serialization *primitive* (a per-workspace `asyncio.Lock`) for atomic
-read-modify-write sequences — callers own the policy of when it is needed.
-It does not coordinate across processes or connections.
+serialization *primitive* (a per-workspace `asyncio.Lock`), and the
+repository layer performs per-key SQL compare-and-set.  Callers own the
+policy of when these are needed; neither coordinates across processes.

@@ -15,11 +15,15 @@ Concurrency contract
   responsive and an in-process lock release can unblock the waiter, so
   "wait, then succeed" is the normal contention outcome.  Concurrent
   multi-process access to a DB file is still not supported.
-* **MVCC** (``enable_mvcc=True``, ``BEGIN CONCURRENT``): multiple
-  connections can write concurrently.  Non-conflicting writes succeed;
-  conflicting writes raise ``DatabaseError`` at **execute** time — callers
-  must catch it and retry the write.  See :meth:`Workspace.serialized` for
-  a same-process serialization primitive; cairn owns the retry policy.
+* **MVCC** (``enable_mvcc=True``, ``PRAGMA journal_mode = "mvcc"``):
+  multiple connections can write concurrently without lock contention
+  (``BEGIN CONCURRENT`` transactions are accepted).  Caveat (verified by
+  probe on pyturso 0.7.2): pyturso's Python API opens an independent MVCC
+  store per connection, so **write-write conflicts are not reliably
+  surfaced** — concurrent same-row writes are effectively last-write-wins
+  and callers must not rely on a conflict error.  Use
+  :meth:`Workspace.serialized` (same-process) or the repository's SQL CAS
+  for atomicity.
 """
 
 from __future__ import annotations
@@ -80,6 +84,23 @@ async def _enable_wal(conn: TursoConnection) -> None:
         logger.warning("Failed to enable WAL mode, got: %s", result[0])
 
 
+async def _enable_mvcc(conn: TursoConnection) -> None:
+    """Enable libSQL MVCC journaling on a turso connection.
+
+    pyturso 0.7.x (Limbo engine) enables MVCC via ``PRAGMA journal_mode =
+    "mvcc"``; the ``experimental_features="mvcc"`` connect option is a
+    no-op on every released pyturso (0.4.4's libSQL build had no MVCC
+    support at all).  The pragma's result row MUST be consumed
+    (``fetchone``) — without it the connection does not recognize MVCC
+    mode and ``BEGIN CONCURRENT`` raises "Concurrent transaction mode is
+    only supported when MVCC is enabled".
+    """
+    cursor = await conn.execute('PRAGMA journal_mode = "mvcc"')
+    result = await cursor.fetchone()
+    if result and result[0] != "mvcc":
+        logger.warning("Failed to enable MVCC mode, got: %s", result[0])
+
+
 class Fsdantic:
     """Factory/entrypoint for opening fsdantic workspaces."""
 
@@ -105,9 +126,14 @@ class Fsdantic:
             path: Explicit path to the database file.
             enable_wal: If True (default), enable WAL journal mode for
                 concurrent read access alongside writes.
-            enable_mvcc: If True, enable MVCC with ``BEGIN CONCURRENT``
-                support for optimistic concurrent writes from multiple
-                connections.  Forces ``enable_wal=True``.
+            enable_mvcc: If True, enable libSQL MVCC journaling
+                (``PRAGMA journal_mode = "mvcc"``) for concurrent writes
+                from multiple connections without lock contention.
+                Forces ``enable_wal=True`` (the mvcc journal replaces
+                WAL).  Note: the driver does not reliably surface
+                write-write conflicts (see the module docstring) — use
+                :meth:`Workspace.serialized` or the repository CAS for
+                atomic read-modify-write.
             readonly: If True, open the workspace read-only.  Write
                 operations — through the manager APIs (``files.write``,
                 ``kv.set``, ``overlay.merge``, ...) or raw statements on
@@ -131,9 +157,11 @@ class Fsdantic:
 
             * **WAL mode** (default): unlimited readers, single writer;
               the writer waits up to ``busy_timeout_ms`` on contention.
-            * **MVCC mode**: multiple connections can write concurrently;
-              conflicting writes raise ``DatabaseError`` at execute time
-              (callers must catch and retry).
+            * **MVCC mode**: multiple connections can write concurrently
+              without lock contention; write-write conflicts are NOT
+              reliably surfaced by the driver (each ``connect()`` opens an
+              independent MVCC store) — use ``Workspace.serialized`` or the
+              repository's SQL CAS for atomic read-modify-write sequences.
             * Each ``turso.aio.Connection`` serializes its own operations
               via a dedicated worker thread — no application-level locking
               is needed for sequential async access on a single connection.
@@ -168,17 +196,20 @@ class Fsdantic:
         connection here, so WAL setup, busy-timeout configuration, and
         read-only guarding happen in exactly one place.
 
-        Order matters for read-only workspaces:
+        Order matters:
 
         1. resolve the DB path (rejecting missing files when ``readonly``);
         2. ``turso_connect``;
-        3. ``_enable_wal`` — must happen **before** locking (it writes the
-           DB header);
+        3. ``_enable_wal`` (non-MVCC only) — must happen **before**
+           locking (it writes the DB header);
         4. ``PRAGMA busy_timeout`` — connection-level setting, applied when
            ``busy_timeout_ms >= 0`` (``0`` disables the wait explicitly);
         5. wrap the connection in ``_ReadonlyGuard``;
         6. ``AgentFS.open_with(guard)`` — schema init must run **unlocked**;
-        7. ``guard.lock()`` + ``PRAGMA query_only = 1`` (numeric! ``= ON``
+        7. ``_enable_mvcc`` (MVCC only) — the journal mode must switch to
+           "mvcc" **after** schema init (mvcc-mode DDL is kept in the
+           in-memory MVCC store and is not visible to other connections);
+        8. ``guard.lock()`` + ``PRAGMA query_only = 1`` (numeric! ``= ON``
            fails to parse on pyturso) as a hard backstop for anything that
            bypasses the proxy (e.g. cursors from ``connection.cursor()``).
         """
@@ -193,11 +224,15 @@ class Fsdantic:
 
         conn = await turso_connect(
             db_path,
-            experimental_features="mvcc" if enable_mvcc else None,
             isolation_level=None if enable_mvcc else "DEFERRED",
         )
 
-        if enable_wal:
+        # MVCC mode must be switched on AFTER schema init: the Limbo engine
+        # keeps mvcc-mode DDL in the in-memory MVCC store, so a schema
+        # created under ``journal_mode = "mvcc"`` is not visible to other
+        # connections.  WAL, by contrast, is applied up front (it writes the
+        # DB header).
+        if enable_wal and not enable_mvcc:
             try:
                 await _enable_wal(conn)
             except Exception as exc:
@@ -211,6 +246,12 @@ class Fsdantic:
         # Schema init (CREATE TABLE IF NOT EXISTS, WAL journal config rows)
         # must run in pass-through, before enforcement starts.
         agentfs = await AgentFS.open_with(guard)
+
+        if enable_mvcc:
+            try:
+                await _enable_mvcc(conn)
+            except Exception as exc:
+                logger.debug("Could not enable MVCC mode: %s", exc)
 
         if readonly:
             guard.lock()
