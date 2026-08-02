@@ -6,6 +6,13 @@ All notable changes to fsdantic are documented in this file.
 
 ### Added
 
+- **Base-union `query`/`search`** — `FileManager.query(query,
+  include_base=True)` and `search(pattern, include_base=True)` also query
+  the base layer and return an overlay-wins union (base entries whose paths
+  are absent from the overlay results are appended after the overlay
+  entries).  Directory shadowing follows `list_dir` (an empty overlay
+  directory does not shadow base content).  Default `include_base=False`
+  preserves the overlay-only behavior. (F5)
 - **`max_content_bytes` parameter** — `Fsdantic.open(...,
   max_content_bytes=N)` caps write payloads at the API boundary:
   `files.write`/`write_many` measure the encoded payload and `kv.set`/

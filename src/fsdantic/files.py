@@ -602,8 +602,21 @@ class FileManager:
         except ErrnoException as e:
             raise translate_agentfs_error(e, context) from e
 
-    async def search(self, pattern: str, recursive: bool = True) -> list[str]:
-        """Search for files matching a glob pattern."""
+    async def search(
+        self,
+        pattern: str,
+        recursive: bool = True,
+        include_base: bool = False,
+    ) -> list[str]:
+        """Search for files matching a glob pattern.
+
+        Args:
+            pattern: Glob pattern (see :class:`FileQuery`).
+            recursive: Whether to search subdirectories.
+            include_base: When True and a ``base_fs`` is configured, also
+                include base-layer files whose paths are absent from the
+                overlay (overlay wins on collisions).
+        """
         from .view import ViewQuery
 
         entries = await self.query(
@@ -612,16 +625,58 @@ class FileManager:
                 recursive=recursive,
                 include_stats=False,
                 include_content=False,
-            )
+            ),
+            include_base=include_base,
         )
         return [entry.path for entry in entries]
 
-    async def query(self, query: FileQuery) -> list[FileEntry]:
-        """Run a query contract and return matching FileEntry records."""
+    async def query(self, query: FileQuery, *, include_base: bool = False) -> list[FileEntry]:
+        """Run a query contract and return matching FileEntry records.
+
+        Args:
+            query: The query contract to run.
+            include_base: When True and a ``base_fs`` is configured, also
+                query the base layer and return an overlay-wins union: base
+                entries whose paths are absent from the overlay results are
+                appended after the overlay entries.  Directory shadowing
+                follows :meth:`list_dir` (an empty overlay directory does
+                not shadow base content).  Default False preserves the
+                overlay-only behavior.
+        """
+        overlay_entries = await self._query_layer(
+            self.agent_fs,
+            query,
+            context_prefix="FileManager.query",
+        )
+        if not include_base or self.base_fs is None:
+            return overlay_entries
+
+        overlay_paths = {entry.path for entry in overlay_entries}
+        base_entries = await self._query_layer(
+            self.base_fs,
+            query,
+            context_prefix="FileManager.query(base)",
+            exclude_paths=overlay_paths,
+        )
+        return overlay_entries + base_entries
+
+    async def _query_layer(
+        self,
+        fs: AgentFS,
+        query: FileQuery,
+        *,
+        context_prefix: str,
+        exclude_paths: set[str] | None = None,
+    ) -> list[FileEntry]:
+        """Run ``query`` against a single filesystem layer (overlay or base)."""
         entries: list[FileEntry] = []
         include_stats = query.needs_file_stats()
 
-        async for item_path, stats in self.traverse_files("/", recursive=query.recursive, include_stats=include_stats):
+        async for item_path, stats in self._traverse_fs(
+            fs, "/", recursive=query.recursive, include_stats=include_stats
+        ):
+            if exclude_paths is not None and item_path in exclude_paths:
+                continue
             if not query.matches_path(item_path):
                 continue
             if not query.matches_regex(item_path):
@@ -632,21 +687,21 @@ class FileManager:
             content = None
             if query.include_content:
                 try:
-                    content = await self.agent_fs.fs.read_file(item_path)
+                    content = await fs.fs.read_file(item_path)
                 except UnicodeDecodeError:
                     try:
-                        content = await self.agent_fs.fs.read_file(item_path, encoding=None)
+                        content = await fs.fs.read_file(item_path, encoding=None)
                     except ErrnoException as e:
                         if e.code == "ENOENT":
                             logger.debug("Path disappeared before binary read: %s", item_path)
                             continue
-                        context = f"FileManager.query(path={item_path!r})"
+                        context = f"{context_prefix}(path={item_path!r})"
                         raise translate_agentfs_error(e, context) from e
                 except ErrnoException as e:
                     if e.code == "ENOENT":
                         logger.debug("Path disappeared before read: %s", item_path)
                         continue
-                    context = f"FileManager.query(path={item_path!r})"
+                    context = f"{context_prefix}(path={item_path!r})"
                     raise translate_agentfs_error(e, context) from e
 
             entries.append(
@@ -737,14 +792,30 @@ class FileManager:
     async def traverse_files(
         self, root: str = "/", *, recursive: bool = True, include_stats: bool = False
     ) -> AsyncIterator[tuple[str, Any | None]]:
-        """Traverse filesystem and yield file paths with optional raw stats."""
+        """Traverse the overlay filesystem and yield file paths with optional
+        raw stats."""
+        async for item in self._traverse_fs(
+            self.agent_fs, root, recursive=recursive, include_stats=include_stats
+        ):
+            yield item
+
+    async def _traverse_fs(
+        self,
+        fs: AgentFS,
+        root: str = "/",
+        *,
+        recursive: bool = True,
+        include_stats: bool = False,
+    ) -> AsyncIterator[tuple[str, Any | None]]:
+        """Traverse a specific filesystem layer and yield file paths with
+        optional raw stats."""
         root = normalize_path(root)
         pending = [root]
 
         while pending:
             path = pending.pop()
             try:
-                items = await self.agent_fs.fs.readdir(path)
+                items = await fs.fs.readdir(path)
             except ErrnoException as error:
                 if error.code == "ENOENT":
                     continue
@@ -754,7 +825,7 @@ class FileManager:
             for item in items:
                 item_path = join_normalized_path(path, item)
                 try:
-                    stats = await self.agent_fs.fs.stat(item_path)
+                    stats = await fs.fs.stat(item_path)
                 except ErrnoException as error:
                     if error.code == "ENOENT":
                         continue
