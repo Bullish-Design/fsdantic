@@ -33,8 +33,11 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install 'pydantic>=2.0.0' 'pyturso==0.4.4' pytest pytest-asyncio pytest-cov hypothesis
-          pip install -e .context/agentfs-main/sdk/python
+          pip install pytest pytest-asyncio pytest-cov hypothesis
+          # fsdantic's own dependencies resolve the SDK fork (git+https,
+          # pyturso>=0.7.2,<0.8). Do NOT pre-install pyturso or the vendored
+          # SDK: the vendored SDK pins pyturso==0.4.4 and would conflict with
+          # the fork dependency.
           pip install -e .
       # Default gate excludes slow/benchmark tests (timing-sensitive);
       # see scripts/phase8_quality_gate_1.py for the canonical stage list.
@@ -52,8 +55,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install 'pydantic>=2.0.0' 'pyturso==0.4.4' pytest pytest-asyncio hypothesis
-          pip install -e .context/agentfs-main/sdk/python
+          pip install pytest pytest-asyncio hypothesis
           pip install -e .
       - name: Run property suite
         run: python -m pytest -q tests/test_property_based.py -p no:cacheprovider --no-cov
@@ -70,8 +72,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install 'pydantic>=2.0.0' 'pyturso==0.4.4' pytest pytest-asyncio
-          pip install -e .context/agentfs-main/sdk/python
+          pip install pytest pytest-asyncio
           pip install -e .
       # Absolute thresholds are machine-specific; record the artifact and
       # compare deltas against tests/performance_baseline.json.
