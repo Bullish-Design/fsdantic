@@ -9,7 +9,6 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
-from errno import EXDEV
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -251,32 +250,24 @@ class Materializer:
     def _swap_staging_to_target(self, staging_path: Path, target_path: Path) -> None:
         """Promote staged output to final target.
 
-        On the same filesystem, rename operations are atomic per operation. The
-        promotion uses rename-based swap first; if rename is unsupported (for
-        example cross-device `EXDEV`), it falls back to a non-atomic copy/move.
+        :meth:`materialize` always creates staging as a sibling of
+        ``target_path``, so both paths sit on one filesystem and every rename
+        here is atomic.  A cross-device ``EXDEV`` cannot occur under that
+        invariant; if one ever does, the error propagates rather than falling
+        back to a non-atomic copy that would delete the target first.
         """
-        backup_path = target_path.parent / f"{target_path.name}.bak-{uuid.uuid4().hex}"
-        target_exists = target_path.exists()
-
-        if not target_exists:
+        if not target_path.exists():
             staging_path.rename(target_path)
             return
 
+        backup_path = target_path.parent / f"{target_path.name}.bak-{uuid.uuid4().hex}"
+        target_path.rename(backup_path)
         try:
-            target_path.rename(backup_path)
-            try:
-                staging_path.rename(target_path)
-            except OSError:
-                backup_path.rename(target_path)
-                raise
-            self._safe_cleanup(backup_path, [])
-        except OSError as e:
-            if e.errno != EXDEV:
-                raise
-            # Cross-device rename fallback: not atomic.
-            if target_path.exists():
-                shutil.rmtree(target_path)
-            shutil.move(str(staging_path), str(target_path))
+            staging_path.rename(target_path)
+        except OSError:
+            backup_path.rename(target_path)
+            raise
+        self._safe_cleanup(backup_path, [])
 
     def _safe_cleanup(self, path: Path, errors: list[tuple[str, str]]) -> None:
         """Best-effort cleanup for staging/backup paths with error tracking."""
