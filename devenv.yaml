@@ -12,7 +12,11 @@ inputs:
   # yazi packages, the guarded `shellij open` enterShell hook, and
   # YAZI_CONFIG_HOME pointing at the packaged Yazi assets.
   shellij:
-    url: path:/home/andrew/Documents/Projects/shellij
+    url: git+file:///home/andrew/Documents/Projects/shellij
+
+  # devenv's git-hooks integration requires this input during evaluation.
+  pre-commit-hooks:
+    url: github:cachix/pre-commit-hooks.nix
 
 imports:
   - shellij/modules
