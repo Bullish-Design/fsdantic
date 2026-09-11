@@ -1,0 +1,4 @@
+schema = 1
+project = "fsdantic"
+groups = ["base"]
+policy = "stable"
