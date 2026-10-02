@@ -7,16 +7,9 @@ inputs:
     inputs:
       nixpkgs:
         follows: nixpkgs
-  # shellij: durable Zellij workbenches. This repo does not import RepoMan's
-  # meta-module, so it imports shellij's devenv module directly — shellij/zellij/
-  # yazi packages, the guarded `shellij open` enterShell hook, and
-  # YAZI_CONFIG_HOME pointing at the packaged Yazi assets.
-  shellij:
-    url: git+file:///home/andrew/Documents/Projects/shellij
 
   # devenv's git-hooks integration requires this input during evaluation.
   pre-commit-hooks:
     url: github:cachix/pre-commit-hooks.nix
 
-imports:
-  - shellij/modules
+imports: []
